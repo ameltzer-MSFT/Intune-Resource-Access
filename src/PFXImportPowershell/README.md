@@ -323,19 +323,19 @@ with an example payload:
 
 ```json
 {
-"id": "",
-"thumbprint": "f6f5f8f6-f8f6-f6f5-f6f8-f5f6f6f8f5f6",
-"intendedPurpose": "smimeEncryption",
-"userPrincipalName": "<User1@contoso.onmicrosoft.com>",
-"startDateTime": "2016-12-31T23:58:46.7156189-07:00",
-"expirationDateTime": "2016-12-31T23:57:57.2481234-07:00",
-"providerName": "Microsoft Software Key Storage Provider",
-"keyName": "KeyNameValue",
-"paddingScheme": "oaepSha512",
-"encryptedPfxBlob": "MIIaHR0cHM6Ly93d3cuYmFzZTY0ZW5jb2RlLm.......",
-"encryptedPfxPassword": ".......0dHBzOi8vd3d3LmJhc2U2NGVuY29kZS5vcm==",
-"createdDateTime": "2017-01-01T00:02:43.5775965-07:00",
-"lastModifiedDateTime": "2017-01-01T00:00:35.1329464-07:0"
+ "id": "",
+ "thumbprint": "f6f5f8f6-f8f6-f6f5-f6f8-f5f6f6f8f5f6",
+ "intendedPurpose": "smimeEncryption",
+ "userPrincipalName": "<User1@contoso.onmicrosoft.com>",
+ "startDateTime": "2016-12-31T23:58:46.7156189-07:00",
+ "expirationDateTime": "2016-12-31T23:57:57.2481234-07:00",
+ "providerName": "Microsoft Software Key Storage Provider",
+ "keyName": "KeyNameValue",
+ "paddingScheme": "oaepSha512",
+ "encryptedPfxBlob": "MIIaHR0cHM6Ly93d3cuYmFzZTY0ZW5jb2RlLm.......",
+ "encryptedPfxPassword": ".......0dHBzOi8vd3d3LmJhc2U2NGVuY29kZS5vcm==",
+ "createdDateTime": "2017-01-01T00:02:43.5775965-07:00",
+ "lastModifiedDateTime": "2017-01-01T00:00:35.1329464-07:0"
 }
 ```
 
