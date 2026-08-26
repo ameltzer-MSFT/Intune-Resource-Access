@@ -16,7 +16,7 @@
 RootModule = 'Microsoft.Management.Powershell.PFXImport.dll'
 
 # Version number of this module.
-ModuleVersion = '1.0'
+ModuleVersion = '3.0'
 
 # ID used to uniquely identify this module
 GUID = '40fbdf09-4bde-43a1-9a37-151640986ccc'
@@ -43,7 +43,7 @@ Copyright = '(c) Microsoft. All rights reserved.'
 # PowerShellHostVersion = ''
 
 # Minimum version of Microsoft .NET Framework required by this module
-# DotNetFrameworkVersion = ''
+DotNetFrameworkVersion = '4.7.2'
 
 # Minimum version of the common language runtime (CLR) required by this module
 # CLRVersion = ''
@@ -104,4 +104,3 @@ PrivateData = @{
     }
 
 }
-
