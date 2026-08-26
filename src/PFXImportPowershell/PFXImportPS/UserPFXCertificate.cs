@@ -123,8 +123,8 @@ namespace Microsoft.Management.Services.Api
         /// <summary>
         /// Elliptic-curve public-key algorithm.
         /// </summary>
-        [EnumMember(Value = "ec")]
-        Ec = 2
+        [EnumMember(Value = "ecc")]
+        Ecc = 2
     }
     #endregion Useful enums
 

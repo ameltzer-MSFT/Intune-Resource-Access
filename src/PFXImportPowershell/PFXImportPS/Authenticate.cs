@@ -27,6 +27,7 @@ namespace Microsoft.Management.Powershell.PFXImport
     using System.Collections;
     using System.Collections.Generic;
     using System.Diagnostics.CodeAnalysis;
+    using System.Globalization;
     using System.Security;
     using Microsoft.Identity.Client;
 
@@ -35,7 +36,6 @@ namespace Microsoft.Management.Powershell.PFXImport
         public const string AuthURI = "login.microsoftonline.com";
         public const string GraphURI = "https://graph.microsoft.com";
         public const string SchemaVersion = "beta";
-        public const string AuthTokenKey = "AuthToken";
 
         public static readonly string ClientId0 = Guid.Empty.ToString();
 
@@ -47,8 +47,6 @@ namespace Microsoft.Management.Powershell.PFXImport
         }
 
         private static CachedTokenApplicationType cachedTokenApplicationType = CachedTokenApplicationType.None;
-
-
 
         public static string GetClientId(Hashtable modulePrivateData)
         {
@@ -77,7 +75,7 @@ namespace Microsoft.Management.Powershell.PFXImport
 
         private static string GetAuthority(Hashtable modulePrivateData)
         {
-            return string.Format("https://{0}/organizations", GetAuthURI(modulePrivateData));
+            return string.Format(CultureInfo.InvariantCulture, "https://{0}/organizations", GetAuthURI(modulePrivateData));
         }
 
         private static string GetTenantId(Hashtable modulePrivateData)
@@ -145,7 +143,7 @@ namespace Microsoft.Management.Powershell.PFXImport
             IConfidentialClientApplication app = ConfidentialClientApplicationBuilder.Create(GetClientId(modulePrivateData))
                 .WithAuthority(GetAuthority(modulePrivateData))
                 .WithRedirectUri(GetRedirectUri(modulePrivateData).ToString())
-                .WithTenantId(GetTenantId(modulePrivateData))  
+                .WithTenantId(GetTenantId(modulePrivateData))
                 .WithClientSecret(GetClientSecret(modulePrivateData))
                 .Build();
             return app;
@@ -155,7 +153,6 @@ namespace Microsoft.Management.Powershell.PFXImport
         {
             if (!string.IsNullOrWhiteSpace(user))
             {
-
                 IPublicClientApplication app = BuildMSALClientApplications(modulePrivateData);
 
                 AuthenticationResult result;
@@ -170,7 +167,7 @@ namespace Microsoft.Management.Powershell.PFXImport
                     }
                     catch (AggregateException ex)
                     {
-                        throw ex.InnerException;
+                        throw ex.InnerException ?? ex;
                     }
                 }
                 else
@@ -183,7 +180,7 @@ namespace Microsoft.Management.Powershell.PFXImport
                     }
                     catch (AggregateException ex)
                     {
-                        throw ex.InnerException;
+                        throw ex.InnerException ?? ex;
                     }
                 }
 
@@ -209,13 +206,13 @@ namespace Microsoft.Management.Powershell.PFXImport
                 {
                     IConfidentialClientApplication app = BuildMSALConfidentialClientApplication(modulePrivateData);
                     result = app.AcquireTokenForClient(GetScopes(modulePrivateData))
-                        .WithAuthority(string.Format("https://{0}", GetAuthURI(modulePrivateData)), GetTenantId(modulePrivateData))
+                        .WithAuthority(string.Format(CultureInfo.InvariantCulture, "https://{0}", GetAuthURI(modulePrivateData)), GetTenantId(modulePrivateData))
                         .ExecuteAsync()
                         .Result;
                 }
                 catch (AggregateException ex)
                 {
-                    throw ex.InnerException;
+                    throw ex.InnerException ?? ex;
                 }
 
                 cachedTokenApplicationType = CachedTokenApplicationType.ConfidentialApplication;
@@ -247,7 +244,7 @@ namespace Microsoft.Management.Powershell.PFXImport
                     }
                     catch (AggregateException ex)
                     {
-                        throw ex.InnerException;
+                        throw ex.InnerException ?? ex;
                     }
                 }
             }
@@ -257,13 +254,13 @@ namespace Microsoft.Management.Powershell.PFXImport
                 {
                     IConfidentialClientApplication app = BuildMSALConfidentialClientApplication(modulePrivateData);
                     return app.AcquireTokenForClient(GetScopes(modulePrivateData))
-                        .WithAuthority(string.Format("https://{0}", GetAuthURI(modulePrivateData)), GetTenantId(modulePrivateData))
+                        .WithAuthority(string.Format(CultureInfo.InvariantCulture, "https://{0}", GetAuthURI(modulePrivateData)), GetTenantId(modulePrivateData))
                         .ExecuteAsync()
                         .Result;
                 }
                 catch (AggregateException ex)
                 {
-                    throw ex.InnerException;
+                    throw ex.InnerException ?? ex;
                 }
             }
             else
@@ -272,7 +269,7 @@ namespace Microsoft.Management.Powershell.PFXImport
             }
         }
 
-        public static void ClearTokenCache(Hashtable modulePrivateData)  
+        public static void ClearTokenCache(Hashtable modulePrivateData)
         {
             IPublicClientApplication app = BuildMSALClientApplications(modulePrivateData);
 

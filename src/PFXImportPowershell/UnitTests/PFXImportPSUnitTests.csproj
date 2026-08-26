@@ -60,22 +60,6 @@
       <Private>True</Private>
     </Reference>
   </ItemGroup>
-  <ItemGroup>
-    <COMFileReference Include="Externals\CERTENROLLLib.tlb">
-      <EmbedInteropTypes>True</EmbedInteropTypes>
-      <TypeLibOutput>$(O)Interop.%(Filename).dll</TypeLibOutput>
-    </COMFileReference>
-  </ItemGroup>
-  <ItemGroup>
-    <QCustomInput Include="@(COMFileReference)">
-      <Visible>false</Visible>
-    </QCustomInput>
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="@(COMFileReference->'%(TypeLibOutput)')">
-      <Visible>false</Visible>
-    </None>
-  </ItemGroup>
   <Choose>
     <When Condition="('$(VisualStudioVersion)' == '10.0' or '$(VisualStudioVersion)' == '') and '$(TargetFrameworkVersion)' == 'v3.5'">
       <ItemGroup>

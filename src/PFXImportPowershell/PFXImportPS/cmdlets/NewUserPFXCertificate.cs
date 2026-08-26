@@ -230,7 +230,7 @@ namespace Microsoft.Management.Powershell.PFXImport.Cmdlets
 
             if (certificate.PublicKey.Oid.Value == "1.2.840.10045.2.1")
             {
-                return UserPfxKeyAlgorithm.Ec;
+                return UserPfxKeyAlgorithm.Ecc;
             }
 
             return UserPfxKeyAlgorithm.Unknown;

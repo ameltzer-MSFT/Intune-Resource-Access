@@ -24,39 +24,23 @@
 namespace Microsoft.Management.Powershell.PFXImport.UnitTests
 {
     using System;
-    using System.Security;
+    using System.IO;
     using System.Linq;
     using System.Management.Automation;
     using System.Management.Automation.Runspaces;
+    using System.Security;
+    using System.Security.Cryptography;
     using System.Text;
     using Cmdlets;
     using Services.Api;
     using VisualStudio.TestTools.UnitTesting;
-    using System.Security.Cryptography;
-    using System.IO;
-    using Microsoft.Intune.EncryptionUtilities;
-    using System.Security.Cryptography.X509Certificates;
 
     [TestClass]
-    [Ignore] //Needs to be run as admin to manage machine certs.
     public class NewUserPFXCertificateUnitTests
     {
-        private const string TestFilePath1 = @"TestCertificates\TestPFX.pfx";
-
-        private const string TestEccFilePath = @"TestCertificates\TestEccPFX.pfx";
-
         private const string TestUPN1 = "IWUser0@contoso.onmicrosoft.com";
 
-        private const string TestProviderName1 = "Microsoft Software Key Storage Provider";
-
-        private const string TestKeyName1 = "IntuneImportPFXTestKey";
-
-        private const string TestAlgorithmName = "RSA";
-
-        // [SuppressMessage("Microsoft.Security", "CS002:SecretInNextLine", Justification = "Unit Test with fake password")]
-        private const string testPassword = "1234";
-
-        private InitialSessionState initialSessionState;
+        private string testPassword;
 
         private Runspace runspace;
 
@@ -64,12 +48,24 @@ namespace Microsoft.Management.Powershell.PFXImport.UnitTests
 
         private PowerShell powershell;
 
+        private RSACng passwordEncryptionKey;
+
+        private string temporaryDirectory;
+
+        private string testFilePath;
+
+        private string testEccFilePath;
+
+        private string publicKeyFilePath;
+
         public TestContext TestContext { get; set; }
 
         [TestInitialize]
         public void Initialize()
         {
-            initialSessionState = InitialSessionState.CreateDefault();
+            CreateTestPassword(out testPassword, out securePassword);
+
+            InitialSessionState initialSessionState = InitialSessionState.CreateDefault();
             initialSessionState.Commands.Add(
                 new SessionStateCmdletEntry(
                     "New-IntuneUserPfxCertificate", typeof(NewUserPFXCertificate), null));
@@ -80,42 +76,70 @@ namespace Microsoft.Management.Powershell.PFXImport.UnitTests
             powershell = PowerShell.Create();
             powershell.Runspace = runspace;
 
-            securePassword = new SecureString();
-            foreach (char c in testPassword)
-            {
-                securePassword.AppendChar(c);
-            }
+            temporaryDirectory = Path.Combine(
+                TestContext.TestDeploymentDir,
+                "PFXImportPSUnitTests",
+                Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(temporaryDirectory);
+            testFilePath = Path.Combine(temporaryDirectory, "TestPFX.pfx");
+            testEccFilePath = Path.Combine(temporaryDirectory, "TestEccPFX.pfx");
+            publicKeyFilePath = Path.Combine(temporaryDirectory, "PfxPasswordEncryptionPublicKey.blob");
 
-            //Need to create the pfxfile
+            File.WriteAllBytes(
+                testFilePath,
+                CertificateTestUtil.CreateSelfSignedCertificatePfx("TestCertSN", testPassword));
 
-            X509Certificate2 testCert = CertificateTestUtil.CreateSelfSignedCertificate("TestCertSN", testPassword, PaddingHashAlgorithmNames.SHA512);
-            byte[] exportedTestCert = testCert.Export(X509ContentType.Pfx, testPassword);
-            using (FileStream fs = new FileStream(TestFilePath1, FileMode.OpenOrCreate))
-            {
-                fs.Write(exportedTestCert, 0, exportedTestCert.Length);
-            }
-            testCert.Export(X509ContentType.Pfx, testPassword);
+            CngKeyCreationParameters keyCreationParameters = new CngKeyCreationParameters();
+            keyCreationParameters.Parameters.Add(
+                new CngProperty(
+                    "Length",
+                    BitConverter.GetBytes(2048),
+                    CngPropertyOptions.None));
+            passwordEncryptionKey = new RSACng(CngKey.Create(
+                CngAlgorithm.Rsa,
+                null,
+                keyCreationParameters));
+            File.WriteAllBytes(
+                publicKeyFilePath,
+                passwordEncryptionKey.Key.Export(new CngKeyBlobFormat("RSAPUBLICBLOB")));
         }
 
         [TestCleanup]
         public void Cleanup()
         {
-            //Clear out the pfx file
-            File.Delete(TestFilePath1);
-            File.Delete(TestEccFilePath);
+            if (powershell != null)
+            {
+                powershell.Dispose();
+            }
+
+            if (runspace != null)
+            {
+                runspace.Dispose();
+            }
+
+            if (securePassword != null)
+            {
+                securePassword.Dispose();
+            }
+
+            if (passwordEncryptionKey != null)
+            {
+                passwordEncryptionKey.Dispose();
+            }
+
+            if (!string.IsNullOrEmpty(temporaryDirectory) && Directory.Exists(temporaryDirectory))
+            {
+                Directory.Delete(temporaryDirectory, true);
+            }
         }
 
         [TestMethod]
         public void TestEncryptPFXFile()
         {
-            ProviderKeyInitialize(TestProviderName1, TestKeyName1, TestAlgorithmName);
-
             Command encryptCommand = GenerateSetUserPFXCertificatesCommand(
-                TestFilePath1,
+                testFilePath,
                 TestUPN1,
                 securePassword,
-                TestProviderName1,
-                TestKeyName1,
                 UserPfxPaddingScheme.None,
                 UserPfxIntendedPurpose.SmimeEncryption);
 
@@ -123,37 +147,29 @@ namespace Microsoft.Management.Powershell.PFXImport.UnitTests
 
             var pfxResults = powershell.Invoke<UserPFXCertificate>();
 
-            Assert.AreEqual(pfxResults.Count(), 1);
+            Assert.AreEqual(pfxResults.Count, 1);
 
             UserPFXCertificate userPFXResult = pfxResults.First();
 
-            Assert.AreEqual(userPFXResult.KeyName, TestKeyName1);
-            Assert.AreEqual(userPFXResult.ProviderName, TestProviderName1);
+            Assert.IsTrue(string.IsNullOrEmpty(userPFXResult.KeyName));
+            Assert.IsTrue(string.IsNullOrEmpty(userPFXResult.ProviderName));
+            Assert.AreEqual(UserPfxKeyAlgorithm.Rsa, userPFXResult.KeyAlgorithm);
             Assert.AreNotEqual(userPFXResult.EncryptedPfxPassword, testPassword);
             Assert.AreEqual(userPFXResult.UserPrincipalName, TestUPN1);
-            Assert.AreEqual(userPFXResult.PaddingScheme, UserPfxPaddingScheme.None);
+            Assert.AreEqual(UserPfxPaddingScheme.OaepSha512, userPFXResult.PaddingScheme);
             Assert.AreEqual(userPFXResult.IntendedPurpose, UserPfxIntendedPurpose.SmimeEncryption);
             Assert.IsNotNull(userPFXResult.EncryptedPfxBlob);
 
-            ValidatePasswordDecryptable(userPFXResult, testPassword, PaddingHashAlgorithmNames.SHA512, PaddingFlags.OAEPPadding);
-
-            ProviderKeyCleanup(TestProviderName1, TestKeyName1);
+            ValidatePasswordDecryptable(userPFXResult, testPassword, RSAEncryptionPadding.OaepSHA512);
         }
 
         [TestMethod]
         public void TestEncryptPFXFileOaepSha256()
         {
-            string hashAlgorithm = PaddingHashAlgorithmNames.SHA256;
-            int paddingFlags = PaddingFlags.OAEPPadding;
-
-            ProviderKeyInitialize(TestProviderName1, TestKeyName1, TestAlgorithmName);
-
             Command encryptCommand = GenerateSetUserPFXCertificatesCommand(
-                TestFilePath1,
+                testFilePath,
                 TestUPN1,
                 securePassword,
-                TestProviderName1,
-                TestKeyName1,
                 UserPfxPaddingScheme.OaepSha256,
                 UserPfxIntendedPurpose.SmimeEncryption);
 
@@ -161,31 +177,22 @@ namespace Microsoft.Management.Powershell.PFXImport.UnitTests
 
             var pfxResults = powershell.Invoke<UserPFXCertificate>();
 
-            Assert.AreEqual(pfxResults.Count(), 1);
+            Assert.AreEqual(pfxResults.Count, 1);
 
             UserPFXCertificate userPFXResult = pfxResults.First();
 
             Assert.AreEqual(userPFXResult.PaddingScheme, UserPfxPaddingScheme.OaepSha256);
 
-            ValidatePasswordDecryptable(userPFXResult, testPassword, hashAlgorithm, paddingFlags);
-
-            ProviderKeyCleanup(TestProviderName1, TestKeyName1);
+            ValidatePasswordDecryptable(userPFXResult, testPassword, RSAEncryptionPadding.OaepSHA256);
         }
 
         [TestMethod]
         public void TestEncryptPFXFileOaepSha384()
         {
-            string hashAlgorithm = PaddingHashAlgorithmNames.SHA384;
-            int paddingFlags = PaddingFlags.OAEPPadding;
-
-            ProviderKeyInitialize(TestProviderName1, TestKeyName1, TestAlgorithmName);
-
             Command encryptCommand = GenerateSetUserPFXCertificatesCommand(
-                TestFilePath1,
+                testFilePath,
                 TestUPN1,
                 securePassword,
-                TestProviderName1,
-                TestKeyName1,
                 UserPfxPaddingScheme.OaepSha384,
                 UserPfxIntendedPurpose.SmimeEncryption);
 
@@ -193,31 +200,22 @@ namespace Microsoft.Management.Powershell.PFXImport.UnitTests
 
             var pfxResults = powershell.Invoke<UserPFXCertificate>();
 
-            Assert.AreEqual(pfxResults.Count(), 1);
+            Assert.AreEqual(pfxResults.Count, 1);
 
             UserPFXCertificate userPFXResult = pfxResults.First();
 
             Assert.AreEqual(userPFXResult.PaddingScheme, UserPfxPaddingScheme.OaepSha384);
 
-            ValidatePasswordDecryptable(userPFXResult, testPassword, hashAlgorithm, paddingFlags);
-
-            ProviderKeyCleanup(TestProviderName1, TestKeyName1);
+            ValidatePasswordDecryptable(userPFXResult, testPassword, RSAEncryptionPadding.OaepSHA384);
         }
 
         [TestMethod]
         public void TestEncryptPFXFileOaepSha512()
         {
-            string hashAlgorithm = PaddingHashAlgorithmNames.SHA512;
-            int paddingFlags = PaddingFlags.OAEPPadding;
-
-            ProviderKeyInitialize(TestProviderName1, TestKeyName1, TestAlgorithmName);
-
             Command encryptCommand = GenerateSetUserPFXCertificatesCommand(
-                TestFilePath1,
+                testFilePath,
                 TestUPN1,
                 securePassword,
-                TestProviderName1,
-                TestKeyName1,
                 UserPfxPaddingScheme.OaepSha512,
                 UserPfxIntendedPurpose.SmimeEncryption);
 
@@ -225,92 +223,79 @@ namespace Microsoft.Management.Powershell.PFXImport.UnitTests
 
             var pfxResults = powershell.Invoke<UserPFXCertificate>();
 
-            Assert.AreEqual(pfxResults.Count(), 1);
+            Assert.AreEqual(pfxResults.Count, 1);
 
             UserPFXCertificate userPFXResult = pfxResults.First();
 
             Assert.AreEqual(userPFXResult.PaddingScheme, UserPfxPaddingScheme.OaepSha512);
 
-            ValidatePasswordDecryptable(userPFXResult, testPassword, hashAlgorithm, paddingFlags);
-
-            ProviderKeyCleanup(TestProviderName1, TestKeyName1);
+            ValidatePasswordDecryptable(userPFXResult, testPassword, RSAEncryptionPadding.OaepSHA512);
         }
 
         [TestMethod]
         public void TestBadFileType()
         {
-            ProviderKeyInitialize(TestProviderName1, TestKeyName1, TestAlgorithmName);
-
             Command encryptCommand = GenerateSetUserPFXCertificatesCommand(
                 @"TestCertificates\TestBadFile.txt",
                 TestUPN1,
                 securePassword,
-                TestProviderName1,
-                TestKeyName1,
                 UserPfxPaddingScheme.None,
                 UserPfxIntendedPurpose.SmimeEncryption);
 
             powershell.Commands.AddCommand(encryptCommand);
             try
             {
-                var pfxResults = powershell.Invoke<UserPFXCertificate>();
+                _ = this.powershell.Invoke<UserPFXCertificate>();
+                Assert.Fail("Expected an invalid PFX file to produce a terminating error.");
             }
             catch (Exception e)
             {
                 Assert.IsTrue(e.Message.Contains("Could not Read Thumbprint"));
             }
-
-            ProviderKeyCleanup(TestProviderName1, TestKeyName1);
         }
-
 
         [TestMethod]
         public void TestWrongPassword()
         {
-            ProviderKeyInitialize(TestProviderName1, TestKeyName1, TestAlgorithmName);
-
-            //[SuppressMessage("Microsoft.Security", "CS002:SecretInNextLine", Justification = "Unit Test with fake password")]
-            string testPassword = "12345";
-            SecureString badSecurePassword = new SecureString();
-            foreach (char c in testPassword)
-            {
-                badSecurePassword.AppendChar(c);
-            }
+            string incorrectPassword;
+            SecureString badSecurePassword;
+            CreateTestPassword(out incorrectPassword, out badSecurePassword);
+            Assert.AreNotEqual(testPassword, incorrectPassword);
 
             Command encryptCommand = GenerateSetUserPFXCertificatesCommand(
-                TestFilePath1,
+                testFilePath,
                 TestUPN1,
                 badSecurePassword,
-                TestProviderName1,
-                TestKeyName1,
                 UserPfxPaddingScheme.None,
                 UserPfxIntendedPurpose.SmimeEncryption);
 
             powershell.Commands.AddCommand(encryptCommand);
             try
             {
-                var pfxResults = powershell.Invoke<UserPFXCertificate>();
+                _ = powershell.Invoke<UserPFXCertificate>();
+                Assert.Fail("Expected an invalid PFX password to produce a terminating error.");
             }
             catch (Exception e)
             {
                 Assert.IsTrue(e.Message.Contains("Verify Password is Correct"));
             }
-
-            ProviderKeyCleanup(TestProviderName1, TestKeyName1);
+            finally
+            {
+                badSecurePassword.Dispose();
+            }
         }
 
         [TestMethod]
         [ExpectedException(typeof(CmdletInvocationException))]
-        public void TestBadProviderName()
+        public void TestMissingPublicKeyFile()
         {
             Command encryptCommand = GenerateSetUserPFXCertificatesCommand(
-                TestFilePath1,
+                testFilePath,
                 TestUPN1,
                 securePassword,
-                "Holy Provider of Azeroth",
-                TestKeyName1,
                 UserPfxPaddingScheme.OaepSha512,
-                UserPfxIntendedPurpose.SmimeEncryption);
+                UserPfxIntendedPurpose.SmimeEncryption,
+                keyFilePath: Path.Combine(temporaryDirectory, "MissingPublicKey.blob"));
 
             powershell.Commands.AddCommand(encryptCommand);
 
@@ -320,9 +305,7 @@ namespace Microsoft.Management.Powershell.PFXImport.UnitTests
         [TestMethod]
         public void TestEncryptPFXFileBase64String()
         {
-            ProviderKeyInitialize(TestProviderName1, TestKeyName1, TestAlgorithmName);
-
-            byte[] pfxData = File.ReadAllBytes(TestFilePath1);
+            byte[] pfxData = File.ReadAllBytes(testFilePath);
 
             string base64String = Convert.ToBase64String(pfxData);
 
@@ -330,8 +313,6 @@ namespace Microsoft.Management.Powershell.PFXImport.UnitTests
             null,
             TestUPN1,
             securePassword,
-            TestProviderName1,
-            TestKeyName1,
             UserPfxPaddingScheme.None,
             UserPfxIntendedPurpose.SmimeEncryption,
             base64String);
@@ -340,40 +321,33 @@ namespace Microsoft.Management.Powershell.PFXImport.UnitTests
 
             var pfxResults = powershell.Invoke<UserPFXCertificate>();
 
-            Assert.AreEqual(pfxResults.Count(), 1);
+            Assert.AreEqual(pfxResults.Count, 1);
 
             UserPFXCertificate userPFXResult = pfxResults.First();
 
-            Assert.AreEqual(userPFXResult.KeyName, TestKeyName1);
-            Assert.AreEqual(userPFXResult.ProviderName, TestProviderName1);
+            Assert.IsTrue(string.IsNullOrEmpty(userPFXResult.KeyName));
+            Assert.IsTrue(string.IsNullOrEmpty(userPFXResult.ProviderName));
+            Assert.AreEqual(UserPfxKeyAlgorithm.Rsa, userPFXResult.KeyAlgorithm);
             Assert.AreNotEqual(userPFXResult.EncryptedPfxPassword, testPassword);
             Assert.AreEqual(userPFXResult.UserPrincipalName, TestUPN1);
-            Assert.AreEqual(userPFXResult.PaddingScheme, UserPfxPaddingScheme.None);
+            Assert.AreEqual(UserPfxPaddingScheme.OaepSha512, userPFXResult.PaddingScheme);
             Assert.AreEqual(userPFXResult.IntendedPurpose, UserPfxIntendedPurpose.SmimeEncryption);
             Assert.IsNotNull(userPFXResult.EncryptedPfxBlob);
 
-            ValidatePasswordDecryptable(userPFXResult, testPassword, PaddingHashAlgorithmNames.SHA512, PaddingFlags.OAEPPadding);
-
-            ProviderKeyCleanup(TestProviderName1, TestKeyName1);
+            ValidatePasswordDecryptable(userPFXResult, testPassword, RSAEncryptionPadding.OaepSHA512);
         }
 
         [TestMethod]
         public void TestEncryptEccPFXFile()
         {
-            ProviderKeyInitialize(TestProviderName1, TestKeyName1, TestAlgorithmName);
-
-            using (X509Certificate2 testCert = CertificateTestUtil.CreateSelfSignedEccCertificate("TestEccCertSN"))
-            {
-                byte[] exportedTestCert = testCert.Export(X509ContentType.Pfx, testPassword);
-                File.WriteAllBytes(TestEccFilePath, exportedTestCert);
-            }
+            File.WriteAllBytes(
+                testEccFilePath,
+                CertificateTestUtil.CreateSelfSignedEccCertificatePfx("TestEccCertSN", testPassword));
 
             Command encryptCommand = GenerateSetUserPFXCertificatesCommand(
-                TestEccFilePath,
+                testEccFilePath,
                 TestUPN1,
                 securePassword,
-                TestProviderName1,
-                TestKeyName1,
                 UserPfxPaddingScheme.None,
                 UserPfxIntendedPurpose.SmimeEncryption);
 
@@ -381,48 +355,36 @@ namespace Microsoft.Management.Powershell.PFXImport.UnitTests
 
             UserPFXCertificate userPFXResult = powershell.Invoke<UserPFXCertificate>().Single();
 
-            Assert.AreEqual(UserPfxKeyAlgorithm.Ec, userPFXResult.KeyAlgorithm);
-
-            ProviderKeyCleanup(TestProviderName1, TestKeyName1);
+            Assert.AreEqual(UserPfxKeyAlgorithm.Ecc, userPFXResult.KeyAlgorithm);
         }
 
-        private void ProviderKeyInitialize(string providerName, string keyName, string algorithmName)
+        private void ValidatePasswordDecryptable(UserPFXCertificate userPFXResult, string expectedPassword, RSAEncryptionPadding padding)
         {
-            ManagedRSAEncryption managedRSA = new ManagedRSAEncryption();
-            if(!managedRSA.TryGenerateLocalRSAKey(providerName, keyName))
-            {
-                //Delete and try again
-                managedRSA.DestroyLocalRSAKey(providerName, keyName);
-                managedRSA.TryGenerateLocalRSAKey(providerName, keyName);
-            }
-        }
-
-        public void ProviderKeyCleanup(string providerName, string keyName)
-        {
-            //Clear out the test key
-            ManagedRSAEncryption managedRSA = new ManagedRSAEncryption();
-            managedRSA.DestroyLocalRSAKey(providerName, keyName);
-        }
-
-        private void ValidatePasswordDecryptable(UserPFXCertificate userPFXResult, string expectedPassword, string hashAlgorithm, int paddingFlags)
-        {
-            ManagedRSAEncryption encryptionUtility = new ManagedRSAEncryption();
             byte[] passwordBytes = Convert.FromBase64String(userPFXResult.EncryptedPfxPassword);
-            byte[] unencryptedPassword = encryptionUtility.DecryptWithLocalKey(userPFXResult.ProviderName, userPFXResult.KeyName, passwordBytes, hashAlgorithm, paddingFlags);
+            byte[] unencryptedPassword = passwordEncryptionKey.Decrypt(passwordBytes, padding);
             string clearTextPassword = Encoding.ASCII.GetString(unencryptedPassword);
 
             Assert.AreEqual(clearTextPassword, expectedPassword);
         }
 
+        private static void CreateTestPassword(out string password, out SecureString securePassword)
+        {
+            password = Guid.NewGuid().ToString("N");
+            securePassword = new SecureString();
+            foreach (char character in password)
+            {
+                securePassword.AppendChar(character);
+            }
+        }
+
         private Command GenerateSetUserPFXCertificatesCommand(
-            string pathToPFXFile, 
+            string pathToPFXFile,
             string upn,
             SecureString pfxPassword,
-            string providerName,
-            string keyName,
             UserPfxPaddingScheme paddingScheme,
             UserPfxIntendedPurpose intendedPurpose,
-            string base64Cert = null)
+            string base64Cert = null,
+            string keyFilePath = null)
         {
             var encryptCommand = new Command("New-IntuneUserPfxCertificate");
             if(base64Cert == null)
@@ -434,13 +396,11 @@ namespace Microsoft.Management.Powershell.PFXImport.UnitTests
             }
             encryptCommand.Parameters.Add("UPN", upn);
             encryptCommand.Parameters.Add("PfxPassword", pfxPassword);
-            encryptCommand.Parameters.Add("ProviderName", providerName);
-            encryptCommand.Parameters.Add("KeyName", keyName);
+            encryptCommand.Parameters.Add("KeyFilePath", keyFilePath ?? publicKeyFilePath);
             encryptCommand.Parameters.Add("PaddingScheme", paddingScheme);
             encryptCommand.Parameters.Add("IntendedPurpose", intendedPurpose);
 
             return encryptCommand;
         }
-
     }
 }

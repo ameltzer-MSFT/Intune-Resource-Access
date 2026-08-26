@@ -1464,7 +1464,7 @@ $password = ConvertTo-SecureString -String "&lt;PFX password&gt;" -AsPlainText -
 Export-PfxCertificate -Cert $certificate -FilePath "&lt;FullPathPFXToCert&gt;" -Password $password
 New-IntuneUserPfxCertificate -PathToPfxFile "&lt;FullPathPFXToCert&gt;" -PfxPassword $password -UPN "&lt;UserUPN&gt;" -ProviderName "&lt;ProviderName&gt;" -KeyName "&lt;KeyName&gt;" -IntendedPurpose SmimeEncryption</dev:code>
 			<dev:remarks>
-				<maml:para>The returned UserPFXCertificate has keyAlgorithm set to ec.</maml:para>
+				<maml:para>The returned UserPFXCertificate has keyAlgorithm set to ecc.</maml:para>
 			</dev:remarks>
 		</command:example>
 	</command:examples>
