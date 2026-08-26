@@ -208,6 +208,31 @@ Describe 'IntunePfxImport 4.0 script module' {
         if ($errorMessage -notlike '*only ASCII characters*') { throw 'Non-ASCII passwords must fail explicitly.' }
     }
 
+    It 'reports a missing machine encryption key without cascading errors' {
+        $module = Get-Module IntunePfxImport
+        $missingKeyName = "MissingIntunePfxKey-$([Guid]::NewGuid())"
+        $errorMessage = $null
+
+        try {
+            & $module {
+                param($keyName)
+                Invoke-IntunePasswordEncryption `
+                    -PasswordBytes ([byte[]](1, 2, 3)) `
+                    -ProviderName 'Microsoft Software Key Storage Provider' `
+                    -KeyName $keyName `
+                    -PaddingScheme OaepSha512
+            } $missingKeyName
+        }
+        catch {
+            $errorMessage = $_.Exception.Message
+        }
+
+        if ($errorMessage -notlike "*Machine CNG key '$missingKeyName' was not found*") {
+            throw "Missing machine key error was not actionable. Error: $errorMessage"
+        }
+        if ($errorMessage -like '*encryptedPassword*') { throw 'A missing machine key produced a cascading encryptedPassword error.' }
+    }
+
     It 'uses command-line configuration for client-secret auth and subsequent Graph requests' {
         Mock -CommandName Invoke-RestMethod -ModuleName IntunePfxImport {
             param($Method, $Uri, $Body)

@@ -100,6 +100,7 @@ Run `Remove-IntuneAuthenticationToken` when finished. The auth context is sessio
 ## Local CNG key operations
 
 These state-changing commands support `-WhatIf` and `-Confirm`.
+Create the machine key once on the computer that performs password encryption, from an elevated session. `New-IntuneUserPfxCertificate` does not create a missing key implicitly.
 
 ```powershell
 Add-IntuneKspKey `

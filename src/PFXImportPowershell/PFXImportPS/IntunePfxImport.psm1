@@ -445,14 +445,27 @@ function Invoke-IntunePasswordEncryption {
         throw [ArgumentException]::new('KeyFilePath or both ProviderName and KeyName are required.')
     }
     $provider = New-Object Security.Cryptography.CngProvider($ProviderName)
-    $key = [Security.Cryptography.CngKey]::Open($KeyName, $provider, [Security.Cryptography.CngKeyOpenOptions]::MachineKey)
-    $rsa = New-Object Security.Cryptography.RSACng($key)
+    $key = $null
+    $rsa = $null
     try {
+        if (-not [Security.Cryptography.CngKey]::Exists($KeyName, $provider, [Security.Cryptography.CngKeyOpenOptions]::MachineKey)) {
+            throw [IO.FileNotFoundException]::new("Machine CNG key '$KeyName' was not found in provider '$ProviderName'. Create it with Add-IntuneKspKey or use -KeyFilePath.", $KeyName)
+        }
+        $key = [Security.Cryptography.CngKey]::Open($KeyName, $provider, [Security.Cryptography.CngKeyOpenOptions]::MachineKey)
+        $rsa = New-Object Security.Cryptography.RSACng($key)
         return $rsa.Encrypt($PasswordBytes, $padding)
     }
+    catch [IO.FileNotFoundException] {
+        throw
+    }
+    catch {
+        throw [Security.Cryptography.CryptographicException]::new(
+            "Could not open or use machine CNG key '$KeyName' in provider '$ProviderName'. Verify the key exists and the current account has access.",
+            $_.Exception)
+    }
     finally {
-        $rsa.Dispose()
-        $key.Dispose()
+        if ($null -ne $rsa) { $rsa.Dispose() }
+        if ($null -ne $key) { $key.Dispose() }
     }
 }
 
@@ -897,8 +910,12 @@ function New-IntuneUserPfxCertificate {
         }
     }
     [byte[]]$passwordBytes = ConvertTo-PasswordBytes -SecureString $PfxPassword
+    [byte[]]$encryptedPassword = $null
     try {
         $encryptedPassword = Invoke-IntunePasswordEncryption -PasswordBytes $passwordBytes -ProviderName $ProviderName -KeyName $KeyName -KeyFilePath $KeyFilePath -PaddingScheme $PaddingScheme
+        if ($null -eq $encryptedPassword) {
+            throw [Security.Cryptography.CryptographicException]::new('The PFX password encryption operation did not return encrypted data.')
+        }
     }
     finally {
         [Array]::Clear($passwordBytes, 0, $passwordBytes.Length)
