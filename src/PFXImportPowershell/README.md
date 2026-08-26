@@ -47,12 +47,28 @@ If using an application client secret for authentication, create the secret unde
 
 # Building the Commandlets
 ## Prerequisite
-Visual Studio 2019 (or above)
+Visual Studio 2019 (or above) with the .NET Framework 4.7.2 Developer Pack.
 
 ## Building
 1. Load .\PFXImportPS.sln in Visual Studio
 2. Select the appropriate build configuration (Debug or Release)
 3. Build solution
+
+## Dependency baseline
+
+The solution uses legacy `packages.config` manifests. The direct package baseline is:
+
+| Package | Version |
+| --- | --- |
+| Castle.Core | 5.2.1 |
+| Microsoft.Identity.Client | 4.88.0 |
+| Moq | 4.20.72 |
+| Newtonsoft.Json | 13.0.4 |
+| System.Runtime.CompilerServices.Unsafe | 6.1.2 |
+| System.Threading.Tasks.Extensions | 4.6.3 |
+| System.ValueTuple | 4.6.2 |
+
+`System.Management.Automation.dll` remains pinned to the Windows PowerShell-compatible reference used by the cmdlets.
 
 # Example Powershell Usage
 
@@ -64,6 +80,7 @@ Visual Studio 2019 (or above)
 - If using an application client secret:
 	- Create the secret in your app registration and specify it in the ClientSecret setting in IntunePfxImport.psd1.  Be sure to keep this file secure.
 	- The TenantId setting is also required when using a client secret.  This value can be found on the app registration "Overview" page.
+	- AuthURI selects the Microsoft Entra cloud authority host. Keep the default `login.microsoftonline.com` for commercial cloud, or use the government-cloud module configuration for `login.microsoftonline.us`.
 
 2. Import the built powershell module. 
 ```
@@ -105,7 +122,9 @@ Set-IntuneAuthenticationToken -AdminUserName "<Admin-UPN>"
 2. Make sure the call Remove-IntuneAuthenticationToken to clear the token cache when all interation with Intune is complete.  Close the PowerShell session to remove credentials cached by the interactive browser.
 
 
-### User authentication with non-interactive login
+### User authentication with non-interactive login (deprecated)
+
+This username/password (ROPC) flow is deprecated by Microsoft Entra. Prefer interactive login or application client-secret authentication for new integrations. Existing scripts can continue using this option while a replacement non-interactive flow is designed.
 
 Prerequisite: to use this option, enable “Allow public client flows” setting on the app registration "Authentication" page.
 
