@@ -669,6 +669,8 @@ function Set-IntuneAuthenticationToken {
     Stores a session-only auth context. Configuration is supplied as command-line parameters, not module manifest PrivateData.
     .PARAMETER ClientId
     Application (client) ID of the Entra application registration.
+    .PARAMETER Setup
+    Configuration object returned by Initialize-IntunePfxImportApplication. Uses its client secret when present; otherwise uses device-code authentication.
     .PARAMETER ClientSecret
     Secure client secret for application authentication.
     .PARAMETER TenantId
@@ -687,10 +689,17 @@ function Set-IntuneAuthenticationToken {
     Registered native-client redirect URI used for delegated authentication.
     .EXAMPLE
     Set-IntuneAuthenticationToken -ClientId $clientId -TenantId $tenantId -ClientSecret $secret
+    .EXAMPLE
+    Set-IntuneAuthenticationToken -Setup $setup
     #>
     [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium', DefaultParameterSetName = 'DeviceCode')]
     param(
-        [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')][string]$ClientId,
+        [Parameter(Mandatory, ParameterSetName = 'ClientSecret')]
+        [Parameter(Mandatory, ParameterSetName = 'Password')]
+        [Parameter(Mandatory, ParameterSetName = 'DeviceCode')]
+        [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')][string]$ClientId,
+        [Parameter(Mandatory, Position = 0, ParameterSetName = 'Setup')]
+        [ValidateNotNull()][psobject]$Setup,
         [Parameter(Mandatory, ParameterSetName = 'ClientSecret')]
         [Parameter(ParameterSetName = 'Password')]
         [Parameter(ParameterSetName = 'DeviceCode')]
@@ -706,6 +715,38 @@ function Set-IntuneAuthenticationToken {
         [ValidatePattern('^https://')][string]$RedirectUri = $script:DefaultRedirectUri
     )
 
+    $authenticationType = $PSCmdlet.ParameterSetName
+    if ($authenticationType -eq 'Setup') {
+        $setupParametersProperty = $Setup.PSObject.Properties['SetIntuneAuthenticationTokenParameters']
+        if ($null -eq $setupParametersProperty -or $setupParametersProperty.Value -isnot [Collections.IDictionary]) {
+            throw [ArgumentException]::new('Setup must be an object returned by Initialize-IntunePfxImportApplication.')
+        }
+        $setupParameters = $setupParametersProperty.Value
+        foreach ($requiredParameter in @('ClientId', 'TenantId', 'AuthUri', 'GraphUri', 'SchemaVersion', 'RedirectUri')) {
+            if (-not $setupParameters.Contains($requiredParameter) -or [string]::IsNullOrWhiteSpace([string]$setupParameters[$requiredParameter])) {
+                throw [ArgumentException]::new("Setup is missing authentication parameter '$requiredParameter'.")
+            }
+        }
+
+        $ClientId = [string]$setupParameters['ClientId']
+        $TenantId = [string]$setupParameters['TenantId']
+        $AuthUri = [string]$setupParameters['AuthUri']
+        $GraphUri = [string]$setupParameters['GraphUri']
+        $SchemaVersion = [string]$setupParameters['SchemaVersion']
+        $RedirectUri = [string]$setupParameters['RedirectUri']
+        $secretProperty = $Setup.PSObject.Properties['ClientSecret']
+        $ClientSecret = if ($null -ne $secretProperty) { $secretProperty.Value } else { $null }
+        if ($null -ne $ClientSecret -and $ClientSecret -isnot [Security.SecureString]) {
+            throw [ArgumentException]::new('Setup.ClientSecret must be a SecureString.')
+        }
+        $modeProperty = $Setup.PSObject.Properties['AuthenticationMode']
+        $authenticationMode = if ($null -ne $modeProperty) { [string]$modeProperty.Value } else { 'Both' }
+        if ($authenticationMode -eq 'ClientSecret' -and $null -eq $ClientSecret) {
+            throw [ArgumentException]::new('Setup requires a client secret. Run Initialize-IntunePfxImportApplication with -CreateClientSecret, or provide explicit authentication parameters.')
+        }
+        $authenticationType = if ($null -ne $ClientSecret) { 'ClientSecret' } else { 'DeviceCode' }
+    }
+
     $authority = Get-IntuneAuthorityUri -AuthUri $AuthUri -TenantId $TenantId
     if (-not $PSCmdlet.ShouldProcess($authority, 'Acquire and cache access token for this session')) { return }
     $scope = "$($GraphUri.TrimEnd('/'))/.default"
@@ -713,10 +754,10 @@ function Set-IntuneAuthenticationToken {
     $context = [pscustomobject]@{
         ClientId = $ClientId; TenantId = $TenantId; AuthUri = $AuthUri; Authority = $authority
         GraphUri = $GraphUri.TrimEnd('/'); SchemaVersion = $SchemaVersion; RedirectUri = $RedirectUri
-        AuthenticationType = $PSCmdlet.ParameterSetName; ClientSecret = $null; AccessToken = $null; ExpiresOn = [DateTimeOffset]::MinValue
+        AuthenticationType = $authenticationType; ClientSecret = $null; AccessToken = $null; ExpiresOn = [DateTimeOffset]::MinValue
     }
 
-    if ($PSCmdlet.ParameterSetName -eq 'ClientSecret') {
+    if ($authenticationType -eq 'ClientSecret') {
         $secret = ConvertTo-PlainText -SecureString $ClientSecret
         try {
             $response = Invoke-RestMethod -Method Post -Uri $tokenUri -Body @{
@@ -726,7 +767,7 @@ function Set-IntuneAuthenticationToken {
         finally { $secret = $null }
         $context.ClientSecret = $ClientSecret
     }
-    elseif ($PSCmdlet.ParameterSetName -eq 'Password') {
+    elseif ($authenticationType -eq 'Password') {
         $password = ConvertTo-PlainText -SecureString $AdminPassword
         try {
             $response = Invoke-RestMethod -Method Post -Uri $tokenUri -Body @{
@@ -796,7 +837,7 @@ function New-IntuneUserPfxCertificate {
     .PARAMETER PfxPassword
     Secure password that protects the PFX private key.
     .PARAMETER UPN
-    User principal name to associate with the imported certificate.
+    User principal name to associate with the imported certificate. When omitted, the module uses the certificate UPN or email name.
     .PARAMETER ProviderName
     CNG provider that contains the password-encryption key when KeyFilePath is not used.
     .PARAMETER KeyName
@@ -815,7 +856,7 @@ function New-IntuneUserPfxCertificate {
         [Parameter(Mandatory, Position = 1, ParameterSetName = 'Path')][string]$PathToPfxFile,
         [Parameter(Mandatory, Position = 1, ParameterSetName = 'Base64')][ValidateNotNullOrEmpty()][string]$Base64EncodedPfx,
         [Parameter(Mandatory, Position = 2)][Security.SecureString]$PfxPassword,
-        [Parameter(Mandatory, Position = 3)][ValidateNotNullOrEmpty()][string]$UPN,
+        [Parameter(Position = 3)][string]$UPN,
         [Parameter(Position = 4)][string]$ProviderName,
         [Parameter(Position = 5)][string]$KeyName,
         [Parameter(Position = 6)][ValidateSet('unassigned', 'smimeEncryption', 'smimeSigning', 'vpn', 'wifi')][string]$IntendedPurpose = 'unassigned',
@@ -845,6 +886,16 @@ function New-IntuneUserPfxCertificate {
     $oid = $certificate.PublicKey.Oid.Value
     $startDateTime = $certificate.NotBefore.ToUniversalTime()
     $expirationDateTime = $certificate.NotAfter.ToUniversalTime()
+    if ([string]::IsNullOrWhiteSpace($UPN)) {
+        $UPN = $certificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::UpnName, $false)
+        if ([string]::IsNullOrWhiteSpace($UPN)) {
+            $UPN = $certificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::EmailName, $false)
+        }
+        if ([string]::IsNullOrWhiteSpace($UPN)) {
+            $certificate.Dispose()
+            throw [ArgumentException]::new('UPN was not supplied and the PFX certificate does not contain a UPN or email name.')
+        }
+    }
     [byte[]]$passwordBytes = ConvertTo-PasswordBytes -SecureString $PfxPassword
     try {
         $encryptedPassword = Invoke-IntunePasswordEncryption -PasswordBytes $passwordBytes -ProviderName $ProviderName -KeyName $KeyName -KeyFilePath $KeyFilePath -PaddingScheme $PaddingScheme
@@ -1205,8 +1256,7 @@ function Initialize-IntunePfxImportApplication {
     Creates an application client secret and returns its one-time value as a SecureString.
     .EXAMPLE
     $setup = Initialize-IntunePfxImportApplication -DisplayName 'Intune PFX Import' -AuthenticationMode Both -ConnectGraph
-    $authParameters = $setup.SetIntuneAuthenticationTokenParameters
-    Set-IntuneAuthenticationToken @authParameters -ClientSecret $setup.ClientSecret
+    Set-IntuneAuthenticationToken -Setup $setup
     #>
     [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High', DefaultParameterSetName = 'ByName')]
     param(

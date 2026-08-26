@@ -166,7 +166,19 @@ Describe 'IntunePfxImport 4.0 script module' {
             return [pscustomobject]@{ access_token = 'device-token'; expires_in = 3600 }
         }
 
-        Set-IntuneAuthenticationToken -ClientId '11111111-1111-1111-1111-111111111111' -TenantId '22222222-2222-2222-2222-222222222222' -Confirm:$false
+        $setup = [pscustomobject]@{
+            AuthenticationMode = 'PublicClient'
+            ClientSecret = $null
+            SetIntuneAuthenticationTokenParameters = [ordered]@{
+                ClientId = '11111111-1111-1111-1111-111111111111'
+                TenantId = '22222222-2222-2222-2222-222222222222'
+                AuthUri = 'login.microsoftonline.com'
+                GraphUri = 'https://graph.microsoft.com'
+                SchemaVersion = 'beta'
+                RedirectUri = 'https://login.microsoftonline.com/common/oauth2/nativeclient'
+            }
+        }
+        Set-IntuneAuthenticationToken -Setup $setup -Confirm:$false
 
         if ($global:IntunePfxTestDevicePoll -ne 2) { throw 'Device-code authentication did not continue after authorization_pending.' }
     }
@@ -541,8 +553,7 @@ Describe 'IntunePfxImport 4.0 script module' {
 
         if ($result.ClientSecret -isnot [Security.SecureString]) { throw 'The one-time client secret must be returned as a SecureString.' }
         if ($result.AdminConsentInstructions -notmatch 'Privileged Role Administrator or Global Administrator') { throw 'Application-mode consent guidance must require Privileged Role Administrator or Global Administrator.' }
-        $authParameters = $result.SetIntuneAuthenticationTokenParameters
-        Set-IntuneAuthenticationToken @authParameters -ClientSecret $result.ClientSecret -Confirm:$false
+        Set-IntuneAuthenticationToken -Setup $result -Confirm:$false
         Get-IntuneUserPfxCertificate | Out-Null
         Assert-MockCalled -CommandName Add-IntuneMgApplicationPassword -ModuleName IntunePfxImport -Times 1 -Exactly
     }
@@ -574,6 +585,9 @@ Describe 'IntunePfxImport 4.0 script module' {
                 'CN=ECC PFX Test',
                 $ecdsa,
                 [Security.Cryptography.HashAlgorithmName]::SHA384)
+            $subjectAlternativeName = [Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder]::new()
+            $subjectAlternativeName.AddEmailAddress('user@contoso.com')
+            $request.CertificateExtensions.Add($subjectAlternativeName.Build())
             $certificate = $request.CreateSelfSigned([DateTimeOffset]::UtcNow.AddDays(-1), [DateTimeOffset]::UtcNow.AddDays(1))
             $pfxPath = Join-Path $TestDrive 'ecc.pfx'
             $passwordText = [Guid]::NewGuid().ToString('N')
@@ -586,9 +600,10 @@ Describe 'IntunePfxImport 4.0 script module' {
             [IO.File]::WriteAllText($keyPath, $pem)
             $password = ConvertTo-SecureString $passwordText -AsPlainText -Force
 
-            $result = New-IntuneUserPfxCertificate -PathToPfxFile $pfxPath -PfxPassword $password -UPN 'user@contoso.com' -KeyFilePath $keyPath
+            $result = New-IntuneUserPfxCertificate -PathToPfxFile $pfxPath -PfxPassword $password -KeyFilePath $keyPath
 
             if ($result.keyAlgorithm -ne 'ecc') { throw "Expected ECC keyAlgorithm but got '$($result.keyAlgorithm)'." }
+            if ($result.userPrincipalName -ne 'user@contoso.com') { throw 'The UPN was not inferred from the certificate email name.' }
             if ($result.paddingScheme -ne 'oaepSha512') { throw 'Expected OAEP SHA-512 padding.' }
             if ([string]::IsNullOrWhiteSpace($result.encryptedPfxPassword)) { throw 'The PFX password was not encrypted.' }
         }
