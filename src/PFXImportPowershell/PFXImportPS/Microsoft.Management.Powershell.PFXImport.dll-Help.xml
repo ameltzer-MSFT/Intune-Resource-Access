@@ -1187,7 +1187,7 @@
 		<dev:version />
 	</command:details>
 	<maml:description>
-		<maml:para>Creates an Import PFX Certificate record formated in such a way that all sensitive information is encrypted and ready to be imported into Intune.</maml:para>
+		<maml:para>Creates an Import PFX Certificate record formatted so that sensitive information is encrypted and ready to be imported into Intune. Supports RSA and ECC PFX files. The cmdlet detects the imported certificate public-key algorithm and loads its private key using an ephemeral key set. Add-IntuneKspKey creates only the RSA key used to encrypt the PFX password; it does not create the certificate's ECC private key.</maml:para>
 	</maml:description>
 	<command:syntax>
 		<command:syntaxItem>
@@ -1454,6 +1454,19 @@
 		</maml:alert>
 	</maml:alertSet>
 	<command:examples>
+		<command:example>
+			<maml:title>Example 1: Create an ECC PFX import record</maml:title>
+			<maml:introduction>
+				<maml:para>Creates a P-384 ECC PFX, then prepares it for Import PFX delivery.</maml:para>
+			</maml:introduction>
+			<dev:code>$certificate = New-SelfSignedCertificate -Subject "CN=ECC PFX" -KeyAlgorithm ECDSA_P384 -CertStoreLocation "Cert:\CurrentUser\My"
+$password = ConvertTo-SecureString -String "&lt;PFX password&gt;" -AsPlainText -Force
+Export-PfxCertificate -Cert $certificate -FilePath "&lt;FullPathPFXToCert&gt;" -Password $password
+New-IntuneUserPfxCertificate -PathToPfxFile "&lt;FullPathPFXToCert&gt;" -PfxPassword $password -UPN "&lt;UserUPN&gt;" -ProviderName "&lt;ProviderName&gt;" -KeyName "&lt;KeyName&gt;" -IntendedPurpose SmimeEncryption</dev:code>
+			<dev:remarks>
+				<maml:para>The returned UserPFXCertificate has keyAlgorithm set to ec.</maml:para>
+			</dev:remarks>
+		</command:example>
 	</command:examples>
 	<maml:relatedLinks>
 		<maml:navigationLink>

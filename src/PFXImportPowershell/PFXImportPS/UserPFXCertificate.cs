@@ -24,6 +24,7 @@
 namespace Microsoft.Management.Services.Api
 {
     using System;
+    using System.Runtime.Serialization;
     using Newtonsoft.Json;
     using Newtonsoft.Json.Converters;
 
@@ -100,6 +101,31 @@ namespace Microsoft.Management.Services.Api
         /// </summary>
         OaepSha512 = 5
     }
+
+    /// <summary>
+    /// Values for the imported certificate public-key algorithm.
+    /// </summary>
+    [JsonConverter(typeof(StringEnumConverter))]
+    public enum UserPfxKeyAlgorithm
+    {
+        /// <summary>
+        /// The public-key algorithm could not be identified.
+        /// </summary>
+        [EnumMember(Value = "unknown")]
+        Unknown = 0,
+
+        /// <summary>
+        /// RSA public-key algorithm.
+        /// </summary>
+        [EnumMember(Value = "rsa")]
+        Rsa = 1,
+
+        /// <summary>
+        /// Elliptic-curve public-key algorithm.
+        /// </summary>
+        [EnumMember(Value = "ec")]
+        Ec = 2
+    }
     #endregion Useful enums
 
     #region Graph entity
@@ -119,6 +145,11 @@ namespace Microsoft.Management.Services.Api
         /// SHA-1 thumbprint of the PFX certificate.
         /// </summary>
         public string Thumbprint { get; set; }
+
+        /// <summary>
+        /// Public-key algorithm detected from the imported PFX certificate.
+        /// </summary>
+        public UserPfxKeyAlgorithm KeyAlgorithm { get; set; }
 
         /// <summary>
         /// Certificate's intended purpose from the point-of-view of deployment.

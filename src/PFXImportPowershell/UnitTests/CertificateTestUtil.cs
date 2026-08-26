@@ -25,6 +25,7 @@ namespace Microsoft.Management.Powershell.PFXImport.UnitTests
 {
     using CERTENROLLLib;
     using System;
+    using System.Security.Cryptography;
     using System.Security.Cryptography.X509Certificates;
 
     public class CertificateTestUtil
@@ -93,6 +94,25 @@ namespace Microsoft.Management.Powershell.PFXImport.UnitTests
                 X509KeyStorageFlags.Exportable | X509KeyStorageFlags.PersistKeySet);
 
             return newCert;
+        }
+
+        /// <summary>
+        /// Generates a self-signed ECC test certificate.
+        /// </summary>
+        public static X509Certificate2 CreateSelfSignedEccCertificate(string subjectName)
+        {
+            using (CngKey key = CngKey.Create(CngAlgorithm.ECDsaP384))
+            using (ECDsaCng ecdsa = new ECDsaCng(key))
+            {
+                CertificateRequest request = new CertificateRequest(
+                    "CN=" + subjectName,
+                    ecdsa,
+                    HashAlgorithmName.SHA384);
+
+                return request.CreateSelfSigned(
+                    DateTimeOffset.UtcNow.AddMinutes(-1),
+                    DateTimeOffset.UtcNow.AddHours(1));
+            }
         }
     }
 }

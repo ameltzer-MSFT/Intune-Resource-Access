@@ -97,7 +97,7 @@ namespace Microsoft.Management.Powershell.PFXImport.Cmdlets
             X509Certificate2 pfxCert = new X509Certificate2();
             try
             {
-                pfxCert.Import(pfxData, PfxPassword, X509KeyStorageFlags.DefaultKeySet);
+                pfxCert.Import(pfxData, PfxPassword, X509KeyStorageFlags.EphemeralKeySet);
             }
             catch (CryptographicException ex)
             {
@@ -203,6 +203,7 @@ namespace Microsoft.Management.Powershell.PFXImport.Cmdlets
 
             UserPFXCertificate userPfxCertifiate = new UserPFXCertificate();
             userPfxCertifiate.Thumbprint = pfxCert.Thumbprint.ToLowerInvariant();
+            userPfxCertifiate.KeyAlgorithm = GetKeyAlgorithm(pfxCert);
             userPfxCertifiate.IntendedPurpose = (UserPfxIntendedPurpose)IntendedPurpose;
 #pragma warning disable CS0618 // Type or member is obsolete
             userPfxCertifiate.PaddingScheme = (UserPfxPaddingScheme)PaddingScheme;
@@ -218,6 +219,21 @@ namespace Microsoft.Management.Powershell.PFXImport.Cmdlets
             userPfxCertifiate.EncryptedPfxBlob = pfxData;
 
             WriteObject(userPfxCertifiate);
+        }
+
+        private static UserPfxKeyAlgorithm GetKeyAlgorithm(X509Certificate2 certificate)
+        {
+            if (certificate.PublicKey.Oid.Value == "1.2.840.113549.1.1.1")
+            {
+                return UserPfxKeyAlgorithm.Rsa;
+            }
+
+            if (certificate.PublicKey.Oid.Value == "1.2.840.10045.2.1")
+            {
+                return UserPfxKeyAlgorithm.Ec;
+            }
+
+            return UserPfxKeyAlgorithm.Unknown;
         }
 
         protected override void BeginProcessing()

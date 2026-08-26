@@ -43,6 +43,8 @@ namespace Microsoft.Management.Powershell.PFXImport.UnitTests
     {
         private const string TestFilePath1 = @"TestCertificates\TestPFX.pfx";
 
+        private const string TestEccFilePath = @"TestCertificates\TestEccPFX.pfx";
+
         private const string TestUPN1 = "IWUser0@contoso.onmicrosoft.com";
 
         private const string TestProviderName1 = "Microsoft Software Key Storage Provider";
@@ -100,6 +102,7 @@ namespace Microsoft.Management.Powershell.PFXImport.UnitTests
         {
             //Clear out the pfx file
             File.Delete(TestFilePath1);
+            File.Delete(TestEccFilePath);
         }
 
         [TestMethod]
@@ -350,6 +353,35 @@ namespace Microsoft.Management.Powershell.PFXImport.UnitTests
             Assert.IsNotNull(userPFXResult.EncryptedPfxBlob);
 
             ValidatePasswordDecryptable(userPFXResult, testPassword, PaddingHashAlgorithmNames.SHA512, PaddingFlags.OAEPPadding);
+
+            ProviderKeyCleanup(TestProviderName1, TestKeyName1);
+        }
+
+        [TestMethod]
+        public void TestEncryptEccPFXFile()
+        {
+            ProviderKeyInitialize(TestProviderName1, TestKeyName1, TestAlgorithmName);
+
+            using (X509Certificate2 testCert = CertificateTestUtil.CreateSelfSignedEccCertificate("TestEccCertSN"))
+            {
+                byte[] exportedTestCert = testCert.Export(X509ContentType.Pfx, testPassword);
+                File.WriteAllBytes(TestEccFilePath, exportedTestCert);
+            }
+
+            Command encryptCommand = GenerateSetUserPFXCertificatesCommand(
+                TestEccFilePath,
+                TestUPN1,
+                securePassword,
+                TestProviderName1,
+                TestKeyName1,
+                UserPfxPaddingScheme.None,
+                UserPfxIntendedPurpose.SmimeEncryption);
+
+            powershell.Commands.AddCommand(encryptCommand);
+
+            UserPFXCertificate userPFXResult = powershell.Invoke<UserPFXCertificate>().Single();
+
+            Assert.AreEqual(UserPfxKeyAlgorithm.Ec, userPFXResult.KeyAlgorithm);
 
             ProviderKeyCleanup(TestProviderName1, TestKeyName1);
         }

@@ -146,6 +146,17 @@ or
 $userPFXObject = New-IntuneUserPfxCertificate -PathToPfxFile "<FullPathPFXToCert>" -PfxPassword $SecureFilePassword -UPN "<UserUPN>" -ProviderName "<ProviderName>" -KeyName "<KeyName>" -IntendedPurpose "<IntendedPurpose>" {-PaddingScheme "<PaddingScheme>"}
 ```
 
+### ECC PFX files
+
+`New-IntuneUserPfxCertificate` supports ECC PFX files, including P-384 certificates created with:
+
+```
+$certificate = New-SelfSignedCertificate -Subject "CN=ECC PFX" -KeyAlgorithm ECDSA_P384 -CertStoreLocation "Cert:\CurrentUser\My"
+Export-PfxCertificate -Cert $certificate -FilePath "<FullPathPFXToCert>" -Password $SecureFilePassword
+```
+
+The cmdlet imports the PFX with an ephemeral key set and detects the certificate public-key algorithm as `rsa`, `ec`, or `unknown` before creating the `userPFXCertificate` object. `Add-IntuneKspKey` remains an RSA key-generation helper for encrypting the imported PFX password; it does not create the certificate's ECC private key.
+
 ## Set up userPFXCertificate object (scenario: encrypting password with the public key that has been exported to a file) 
 1. Setup Secure File Password string.
 ```
