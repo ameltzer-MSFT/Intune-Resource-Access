@@ -18,6 +18,7 @@ The operator needs a Graph SDK connection with `Application.ReadWrite.All` and `
 
 ```powershell
 Install-Module Microsoft.Graph -Scope CurrentUser
+Import-Module .\PFXImportPS\IntunePfxImport.psd1
 
 $setup = Initialize-IntunePfxImportApplication `
     -DisplayName 'Intune PFX Import' `
@@ -26,15 +27,15 @@ $setup = Initialize-IntunePfxImportApplication `
     -ConnectGraph
 ```
 
-The function creates or reuses an app registration and service principal, configures application `DeviceManagementConfiguration.ReadWrite.All` and `User.Read.All`, and configures delegated `DeviceManagementConfiguration.ReadWrite.All`, `User.Read.All`, and `User.Read` when `PublicClient` or `Both` is selected. It also configures the native redirect URI and public-client flow for device-code and legacy ROPC compatibility.
+The function creates or reuses an app registration and service principal, configures application `DeviceManagementConfiguration.ReadWrite.All` and `User.Read.All`, and configures delegated `DeviceManagementConfiguration.ReadWrite.All`, `User.Read.All`, and `User.Read` when `PublicClient` or `Both` is selected. It also configures the native redirect URI and public-client flow for device-code and legacy ROPC compatibility. An exact display-name match is reused; multiple matches cause an error. Use `-ExistingApplicationId` to select an existing registration deterministically.
 
-It returns a setup object that can be passed directly to authentication. When `-CreateClientSecret` was requested, authentication uses its one-time `SecureString` secret. Otherwise, it starts device-code authentication:
+The Graph SDK caller cannot silently grant admin consent. For `ClientSecret` or `Both`, open `$setup.AdminConsentUri` as a Privileged Role Administrator or Global Administrator, review the requested permissions, and grant consent before importing certificates. Delegated-only configurations can use an appropriately authorized tenant administrator when consent is required.
+
+After consent, pass the setup object directly to authentication. When `-CreateClientSecret` was requested, authentication uses its one-time `SecureString` secret. Otherwise, it starts device-code authentication:
 
 ```powershell
 Set-IntuneAuthenticationToken -Setup $setup
 ```
-
-The Graph SDK caller cannot silently grant admin consent. For `ClientSecret` or `Both`, open `$setup.AdminConsentUri` as a Privileged Role Administrator or Global Administrator, review the requested permissions, and grant consent before importing certificates. The command returns this link and explicit instructions rather than claiming consent succeeded. Delegated-only configurations can use an appropriately authorized tenant administrator when consent is required.
 
 For an existing registration, use its client ID. `-ValidateOnly` is read-only and reports missing permissions, public-client configuration, or service principal creation without changing the tenant:
 
@@ -51,7 +52,10 @@ For GCC High, use the sovereign cloud endpoints in both onboarding and authentic
 $setup = Initialize-IntunePfxImportApplication `
     -AuthenticationMode Both `
     -AuthUri 'login.microsoftonline.us' `
-    -GraphUri 'https://graph.microsoft.us'
+    -GraphUri 'https://graph.microsoft.us' `
+    -ConnectGraph
+
+Set-IntuneAuthenticationToken -Setup $setup
 ```
 
 Imported PFX certificates require the Certificate Connector to access the private key that protects imported PFX passwords. See [Configure and use imported PKCS certificates with Intune](https://learn.microsoft.com/intune/device-configuration/certificates/imported-pfx-profiles).
@@ -64,7 +68,7 @@ Import the script module directly:
 Import-Module .\PFXImportPS\IntunePfxImport.psd1
 ```
 
-All app and cloud settings are command-line parameters. Commercial-cloud defaults are safe for `AuthUri`, `GraphUri`, `SchemaVersion`, and `RedirectUri`; `ClientId` is always required.
+All app and cloud settings are command-line parameters. Commercial-cloud defaults are safe for `AuthUri`, `GraphUri`, `SchemaVersion`, and `RedirectUri`. Prefer `-Setup $setup`; use the explicit parameters below for an existing registration or unattended automation that does not use the onboarding function.
 
 ```powershell
 $clientSecret = Read-Host 'Application client secret' -AsSecureString
@@ -119,6 +123,8 @@ PFX passwords must contain only ASCII characters. The Intune Certificate Connect
 
 `UPN` is optional when the PFX contains a UPN or email name. Supply `-UPN` only when the certificate does not encode the target Intune user.
 
+The authenticated account is the operator and is not assumed to be the certificate recipient.
+
 ```powershell
 $pfxPassword = Read-Host 'PFX password' -AsSecureString
 $record = New-IntuneUserPfxCertificate `
@@ -143,10 +149,12 @@ $record = New-IntuneUserPfxCertificate `
 
 Use `Get-IntuneUserPfxCertificate`, `Get-IntuneUserId`, `Import-IntuneUserPfxCertificate -IsUpdate`, and `Remove-IntuneUserPfxCertificate` for Graph CRUD.
 
+Relative input and output paths such as `.\user.pfx` and `.\PfxImportKey.pem` resolve from the caller's current PowerShell location.
+
 ## Migration from 3.0
 
 - Replace the built DLL import with `Import-Module .\PFXImportPS\IntunePfxImport.psd1`.
-- Remove all `PrivateData` values from `IntunePfxImport.psd1`. Pass `ClientId`, `TenantId`, and `ClientSecret` to `Set-IntuneAuthenticationToken`.
+- Remove all `PrivateData` values from `IntunePfxImport.psd1`. Use `Set-IntuneAuthenticationToken -Setup $setup`, or pass `ClientId`, `TenantId`, and `ClientSecret` explicitly for an existing automation flow.
 - Replace manual Entra application setup with `Initialize-IntunePfxImportApplication`, grant consent through its `AdminConsentUri`, then pass the result directly to `Set-IntuneAuthenticationToken -Setup`.
 - Pass sovereign-cloud `AuthUri` and `GraphUri` to `Set-IntuneAuthenticationToken`; do not edit or copy a government-cloud manifest.
 - Existing public command names, CNG blob formats, PEM public-key support, Graph resource paths, `-IsUpdate`, padding values, and PFX object fields remain available.
