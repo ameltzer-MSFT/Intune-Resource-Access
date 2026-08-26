@@ -240,6 +240,33 @@ function New-IntuneODataFilterPath {
     return "${Path}?`$filter=$([uri]::EscapeDataString($Filter))"
 }
 
+function Resolve-IntuneFileSystemPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$MustExist
+    )
+
+    if ($MustExist) {
+        $item = Get-Item -LiteralPath $Path -ErrorAction Stop
+        if ($item.PSProvider.Name -ne 'FileSystem' -or $item.PSIsContainer) {
+            throw [IO.FileNotFoundException]::new("File '$Path' was not found.", $Path)
+        }
+        return $item.FullName
+    }
+
+    $provider = $null
+    $drive = $null
+    $resolvedPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath(
+        $Path,
+        [ref]$provider,
+        [ref]$drive)
+    if ($provider.Name -ne 'FileSystem') {
+        throw [ArgumentException]::new("Path '$Path' must use the FileSystem provider.")
+    }
+    return $resolvedPath
+}
+
 function Get-IntuneRsaPadding {
     [CmdletBinding()]
     param([Parameter(Mandatory)][ValidateSet('OaepSha256', 'OaepSha384', 'OaepSha512')][string]$PaddingScheme)
@@ -349,9 +376,10 @@ function ConvertTo-RsaPublicKeyPem {
 
 function Get-RsaFromPemFile {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })][string]$Path)
+    param([Parameter(Mandatory)][string]$Path)
 
-    $pem = [IO.File]::ReadAllText($Path)
+    $resolvedPath = Resolve-IntuneFileSystemPath -Path $Path -MustExist
+    $pem = [IO.File]::ReadAllText($resolvedPath)
     $base64 = ($pem -replace '-----BEGIN PUBLIC KEY-----', '' -replace '-----END PUBLIC KEY-----', '' -replace '\s', '')
     $der = [Convert]::FromBase64String($base64)
     $offset = 0
@@ -392,18 +420,16 @@ function Invoke-IntunePasswordEncryption {
 
     $padding = Get-IntuneRsaPadding -PaddingScheme $PaddingScheme
     if (-not [string]::IsNullOrWhiteSpace($KeyFilePath)) {
-        if (-not (Test-Path -LiteralPath $KeyFilePath -PathType Leaf)) {
-            throw [IO.FileNotFoundException]::new("Public-key file '$KeyFilePath' was not found.", $KeyFilePath)
-        }
+        $resolvedKeyFilePath = Resolve-IntuneFileSystemPath -Path $KeyFilePath -MustExist
         $key = $null
         $rsa = $null
         try {
-            if ([IO.Path]::GetExtension($KeyFilePath) -ieq '.pem') {
-                $rsa = Get-RsaFromPemFile -Path $KeyFilePath
+            if ([IO.Path]::GetExtension($resolvedKeyFilePath) -ieq '.pem') {
+                $rsa = Get-RsaFromPemFile -Path $resolvedKeyFilePath
             }
             else {
                 $key = [Security.Cryptography.CngKey]::Import(
-                    [IO.File]::ReadAllBytes($KeyFilePath),
+                    [IO.File]::ReadAllBytes($resolvedKeyFilePath),
                     [Security.Cryptography.CngKeyBlobFormat]::new('RSAPUBLICBLOB'))
                 $rsa = New-Object Security.Cryptography.RSACng($key)
             }
@@ -510,8 +536,9 @@ function ConvertTo-IntuneBase64EncodedPfxCertificate {
     ConvertTo-IntuneBase64EncodedPfxCertificate -CertificatePath .\user.pfx
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory, Position = 0)][ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })][string]$CertificatePath)
-    [Convert]::ToBase64String([IO.File]::ReadAllBytes($CertificatePath))
+    param([Parameter(Mandatory, Position = 0)][string]$CertificatePath)
+    $resolvedCertificatePath = Resolve-IntuneFileSystemPath -Path $CertificatePath -MustExist
+    [Convert]::ToBase64String([IO.File]::ReadAllBytes($resolvedCertificatePath))
 }
 
 function Export-IntunePublicKey {
@@ -539,16 +566,17 @@ function Export-IntunePublicKey {
         [ValidateSet('CngBlob', 'Pem')][string]$FileFormat = 'CngBlob'
     )
 
-    if (Test-Path -LiteralPath $FilePath) { throw [IO.IOException]::new("File '$FilePath' already exists.") }
-    if ($PSCmdlet.ShouldProcess($FilePath, "Export $FileFormat public key")) {
+    $resolvedFilePath = Resolve-IntuneFileSystemPath -Path $FilePath
+    if (Test-Path -LiteralPath $resolvedFilePath) { throw [IO.IOException]::new("File '$FilePath' already exists.") }
+    if ($PSCmdlet.ShouldProcess($resolvedFilePath, "Export $FileFormat public key")) {
         $key = [Security.Cryptography.CngKey]::Open($KeyName, (New-Object Security.Cryptography.CngProvider($ProviderName)), [Security.Cryptography.CngKeyOpenOptions]::MachineKey)
         $rsa = New-Object Security.Cryptography.RSACng($key)
         try {
             if ($FileFormat -eq 'CngBlob') {
-                [IO.File]::WriteAllBytes($FilePath, $key.Export([Security.Cryptography.CngKeyBlobFormat]::new('RSAPUBLICBLOB')))
+                [IO.File]::WriteAllBytes($resolvedFilePath, $key.Export([Security.Cryptography.CngKeyBlobFormat]::new('RSAPUBLICBLOB')))
             }
             else {
-                [IO.File]::WriteAllText($FilePath, (ConvertTo-RsaPublicKeyPem -Rsa $rsa))
+                [IO.File]::WriteAllText($resolvedFilePath, (ConvertTo-RsaPublicKeyPem -Rsa $rsa))
             }
         }
         finally {
@@ -580,10 +608,11 @@ function Export-IntunePrivateKey {
         [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$FilePath
     )
 
-    if (Test-Path -LiteralPath $FilePath) { throw [IO.IOException]::new("File '$FilePath' already exists.") }
-    if ($PSCmdlet.ShouldProcess($FilePath, 'Export private key')) {
+    $resolvedFilePath = Resolve-IntuneFileSystemPath -Path $FilePath
+    if (Test-Path -LiteralPath $resolvedFilePath) { throw [IO.IOException]::new("File '$FilePath' already exists.") }
+    if ($PSCmdlet.ShouldProcess($resolvedFilePath, 'Export private key')) {
         $key = [Security.Cryptography.CngKey]::Open($KeyName, (New-Object Security.Cryptography.CngProvider($ProviderName)), [Security.Cryptography.CngKeyOpenOptions]::MachineKey)
-        try { [IO.File]::WriteAllBytes($FilePath, $key.Export([Security.Cryptography.CngKeyBlobFormat]::new('RSAFULLPRIVATEBLOB'))) }
+        try { [IO.File]::WriteAllBytes($resolvedFilePath, $key.Export([Security.Cryptography.CngKeyBlobFormat]::new('RSAFULLPRIVATEBLOB'))) }
         finally { $key.Dispose() }
     }
 }
@@ -609,10 +638,11 @@ function Import-IntunePrivateKey {
     param(
         [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$ProviderName,
         [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$KeyName,
-        [Parameter(Mandatory)][ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })][string]$FilePath,
+        [Parameter(Mandatory)][string]$FilePath,
         [switch]$MakeExportable
     )
 
+    $resolvedFilePath = Resolve-IntuneFileSystemPath -Path $FilePath -MustExist
     $provider = New-Object Security.Cryptography.CngProvider($ProviderName)
     if ([Security.Cryptography.CngKey]::Exists($KeyName, $provider, [Security.Cryptography.CngKeyOpenOptions]::MachineKey)) {
         throw [InvalidOperationException]::new("CNG key '$KeyName' already exists in '$ProviderName'.")
@@ -624,7 +654,7 @@ function Import-IntunePrivateKey {
         $parameters.ExportPolicy = if ($MakeExportable) {
             [Security.Cryptography.CngExportPolicies]::AllowExport -bor [Security.Cryptography.CngExportPolicies]::AllowPlaintextExport
         } else { [Security.Cryptography.CngExportPolicies]::None }
-        $parameters.Parameters.Add((New-Object Security.Cryptography.CngProperty('RSAFULLPRIVATEBLOB', [IO.File]::ReadAllBytes($FilePath), [Security.Cryptography.CngPropertyOptions]::None)))
+        $parameters.Parameters.Add((New-Object Security.Cryptography.CngProperty('RSAFULLPRIVATEBLOB', [IO.File]::ReadAllBytes($resolvedFilePath), [Security.Cryptography.CngPropertyOptions]::None)))
         Add-IntuneConnectorKeyAccess -Parameters $parameters -ProviderName $ProviderName
         $key = [Security.Cryptography.CngKey]::Create([Security.Cryptography.CngAlgorithm]::Rsa, $KeyName, $parameters)
         $key.Dispose()
@@ -782,7 +812,7 @@ function New-IntuneUserPfxCertificate {
     #>
     [CmdletBinding(DefaultParameterSetName = 'Path')]
     param(
-        [Parameter(Mandatory, Position = 1, ParameterSetName = 'Path')][ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })][string]$PathToPfxFile,
+        [Parameter(Mandatory, Position = 1, ParameterSetName = 'Path')][string]$PathToPfxFile,
         [Parameter(Mandatory, Position = 1, ParameterSetName = 'Base64')][ValidateNotNullOrEmpty()][string]$Base64EncodedPfx,
         [Parameter(Mandatory, Position = 2)][Security.SecureString]$PfxPassword,
         [Parameter(Mandatory, Position = 3)][ValidateNotNullOrEmpty()][string]$UPN,
@@ -795,7 +825,8 @@ function New-IntuneUserPfxCertificate {
 
     [byte[]]$pfxData = $null
     if ($PSCmdlet.ParameterSetName -eq 'Path') {
-        $pfxData = [IO.File]::ReadAllBytes($PathToPfxFile)
+        $resolvedPfxPath = Resolve-IntuneFileSystemPath -Path $PathToPfxFile -MustExist
+        $pfxData = [IO.File]::ReadAllBytes($resolvedPfxPath)
     }
     else {
         $pfxData = [Convert]::FromBase64String($Base64EncodedPfx)

@@ -59,6 +59,32 @@ Describe 'IntunePfxImport 4.0 script module' {
         if ((ConvertTo-IntuneBase64EncodedPfxCertificate -CertificatePath $pfxPath) -ne 'AQIDBA==') { throw 'PFX bytes were not Base64 encoded correctly.' }
     }
 
+    It 'resolves relative file paths from the callers current location' {
+        $pfxPath = Join-Path $TestDrive 'relative-certificate.pfx'
+        [IO.File]::WriteAllBytes($pfxPath, [byte[]](1, 2, 3, 4))
+        $password = ConvertTo-SecureString 'test' -AsPlainText -Force
+        $errorMessage = $null
+
+        Push-Location $TestDrive
+        try {
+            $base64 = ConvertTo-IntuneBase64EncodedPfxCertificate -CertificatePath '.\relative-certificate.pfx'
+            try {
+                New-IntuneUserPfxCertificate -PathToPfxFile '.\relative-certificate.pfx' -PfxPassword $password -UPN 'user@contoso.com' -KeyFilePath '.\unused.pem'
+            }
+            catch {
+                $errorMessage = $_.Exception.Message
+            }
+        }
+        finally {
+            Pop-Location
+        }
+
+        if ($base64 -ne 'AQIDBA==') { throw 'The relative input path was not resolved from the caller location.' }
+        if ($errorMessage -notlike '*Could not load the PFX*') {
+            throw "New-IntuneUserPfxCertificate did not read the caller-relative PFX path. Error: $errorMessage"
+        }
+    }
+
     It 'does not call Graph when an import is simulated with WhatIf' {
         Mock -CommandName Invoke-RestMethod -ModuleName IntunePfxImport { throw 'Graph must not be called for WhatIf.' }
         $certificate = [pscustomobject]@{
