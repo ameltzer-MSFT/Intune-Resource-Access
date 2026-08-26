@@ -1,6 +1,6 @@
 @{
     RootModule = 'IntunePfxImport.psm1'
-    ModuleVersion = '4.0.0'
+    ModuleVersion = '4.0.1'
     GUID = '40fbdf09-4bde-43a1-9a37-151640986ccc'
     Author = 'Microsoft'
     CompanyName = 'Microsoft'

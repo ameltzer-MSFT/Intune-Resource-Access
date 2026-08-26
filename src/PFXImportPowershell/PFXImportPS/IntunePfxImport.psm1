@@ -954,7 +954,8 @@ function Get-IntuneUserId {
     $filter = Escape-IntuneODataLiteral -Value $UPN
     $path = New-IntuneODataFilterPath -Path 'users' -Filter "userPrincipalName eq '$filter'"
     $response = Invoke-IntuneGraphRequest -Method Get -Path $path
-    $user = @($response.value)[0]
+    $users = @($response.value)
+    $user = if ($users.Count -gt 0) { $users[0] } else { $null }
     if ($null -eq $user -or [string]::IsNullOrWhiteSpace($user.id)) { throw [InvalidOperationException]::new("No user was found for '$UPN'.") }
     return ($user.id -replace '-', '')
 }

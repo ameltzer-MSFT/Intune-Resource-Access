@@ -29,7 +29,7 @@ Describe 'IntunePfxImport 4.0 script module' {
     It 'exports the documented public function contract explicitly' {
         $manifest = Import-PowerShellDataFile -Path $manifestPath
 
-        if ($manifest.ModuleVersion -ne '4.0.0') { throw 'ModuleVersion must be 4.0.0.' }
+        if ($manifest.ModuleVersion -ne '4.0.1') { throw 'ModuleVersion must be 4.0.1.' }
         if ($manifest.RootModule -ne 'IntunePfxImport.psm1') { throw 'The manifest must load the script module.' }
         if ($manifest.FunctionsToExport -contains '*') { throw 'The manifest must not use wildcard function exports.' }
         if (@($manifest.CmdletsToExport).Count -ne 0) { throw 'The manifest must not export compiled cmdlets.' }
@@ -105,6 +105,29 @@ Describe 'IntunePfxImport 4.0 script module' {
         $errorMessage = $null
         try { Get-IntuneUserPfxCertificate } catch { $errorMessage = $_.Exception.Message }
         if ($errorMessage -notlike '*Call Set-IntuneAuthenticationToken first*') { throw 'Graph reads must require an authentication context.' }
+    }
+
+    It 'reports a missing directory user without a strict-mode indexing error' {
+        Mock -CommandName Invoke-RestMethod -ModuleName IntunePfxImport {
+            param($Uri)
+            if ($Uri -match '/oauth2/v2.0/token$') {
+                return [pscustomobject]@{ access_token = 'missing-user-token'; expires_in = 3600 }
+            }
+            return [pscustomobject]@{ value = @() }
+        }
+        $secret = ConvertTo-SecureString ([Guid]::NewGuid().ToString('N')) -AsPlainText -Force
+        Set-IntuneAuthenticationToken `
+            -ClientId '99999999-9999-9999-9999-999999999999' `
+            -TenantId '88888888-8888-8888-8888-888888888888' `
+            -ClientSecret $secret `
+            -Confirm:$false
+
+        $errorMessage = $null
+        try { Get-IntuneUserId -UPN 'missing@contoso.com' } catch { $errorMessage = $_.Exception.Message }
+
+        if ($errorMessage -ne "No user was found for 'missing@contoso.com'.") {
+            throw "Expected a clear missing-user error but got: $errorMessage"
+        }
     }
 
     It 'requires a tenant for client-secret authentication' {
