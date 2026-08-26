@@ -139,6 +139,33 @@ Describe 'IntunePfxImport 4.0 script module' {
         }
     }
 
+    It 'builds the connector key ACL on every supported PowerShell edition' {
+        $result = & (Get-Module IntunePfxImport) {
+            $parameters = New-Object Security.Cryptography.CngKeyCreationParameters
+
+            Add-IntuneConnectorKeyAccess `
+                -Parameters $parameters `
+                -ProviderName 'Microsoft Software Key Storage Provider'
+
+            $property = @($parameters.Parameters | Where-Object Name -eq 'Security Descr')[0]
+            $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new(
+                $property.GetValue(),
+                0)
+            [pscustomobject]@{
+                PropertyCount = $parameters.Parameters.Count
+                Sddl = $descriptor.GetSddlForm(
+                    [Security.AccessControl.AccessControlSections]::Access)
+            }
+        }
+
+        if ($result.PropertyCount -ne 1) {
+            throw 'The software KSP creation parameters must contain one security descriptor.'
+        }
+        if ($result.Sddl -ne 'D:(A;;FA;;;BA)(A;;GR;;;SY)') {
+            throw "The connector key ACL is incorrect: $($result.Sddl)"
+        }
+    }
+
     It 'continues device-code polling while authorization is pending' {
         $global:IntunePfxTestDevicePoll = 0
         Mock -CommandName Start-Sleep -ModuleName IntunePfxImport {}

@@ -480,15 +480,14 @@ function Add-IntuneConnectorKeyAccess {
         return
     }
 
-    $security = New-Object Security.AccessControl.CryptoKeySecurity
-    $administrators = New-Object Security.Principal.SecurityIdentifier([Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
-    $localSystem = New-Object Security.Principal.SecurityIdentifier([Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
-    $security.AddAccessRule((New-Object Security.AccessControl.CryptoKeyAccessRule($administrators, [Security.AccessControl.CryptoKeyRights]::FullControl, [Security.AccessControl.AccessControlType]::Allow)))
-    $security.AddAccessRule((New-Object Security.AccessControl.CryptoKeyAccessRule($localSystem, [Security.AccessControl.CryptoKeyRights]::GenericRead, [Security.AccessControl.AccessControlType]::Allow)))
+    $security = [Security.AccessControl.RawSecurityDescriptor]::new(
+        'D:(A;;FA;;;BA)(A;;GR;;;SY)')
+    [byte[]]$securityDescriptor = New-Object byte[] $security.BinaryLength
+    $security.GetBinaryForm($securityDescriptor, 0)
     $daclSecurityInformation = [Security.Cryptography.CngPropertyOptions]4
     $Parameters.Parameters.Add((New-Object Security.Cryptography.CngProperty(
         'Security Descr',
-        $security.GetSecurityDescriptorBinaryForm(),
+        $securityDescriptor,
         ([Security.Cryptography.CngPropertyOptions]::Persist -bor $daclSecurityInformation))))
 }
 
