@@ -1,6 +1,6 @@
 # PFXImport Powershell Project
 
-This project consists of helper Powershell Commandlets for importing PFX certificates to Microsoft Intune. Prior to running these scripts you will need to create the PFX files to import. Further documentation of the feature can be found [here](https://docs.microsoft.com/en-us/intune/certificates-s-mime-encryption-sign).
+This project consists of helper PowerShell cmdlets for importing PFX certificates to Microsoft Intune. Prior to running these scripts, you need to create the PFX files to import. For more information, see [Configure and use imported PKCS certificates with Intune](https://learn.microsoft.com/intune/device-configuration/certificates/imported-pfx-profiles).
 
 These scripts provide a baseline for the actions that can take place to import your PFX Certificates to Intune. They can be modified and adapted to fit your workflow. Most of the cmdlets are wrappers of Intune Graph calls.
 
