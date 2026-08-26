@@ -174,9 +174,11 @@ namespace Microsoft.Management.Powershell.PFXImport
                 {
                     try
                     {
+#pragma warning disable CS0618 // Preserve the documented -AdminPassword ROPC flow until its replacement is designed.
                         result = app.AcquireTokenByUsernamePassword(GetScopes(modulePrivateData), user, password)
                             .ExecuteAsync()
                             .Result;
+#pragma warning restore CS0618
                     }
                     catch (AggregateException ex)
                     {
@@ -206,7 +208,7 @@ namespace Microsoft.Management.Powershell.PFXImport
                 {
                     IConfidentialClientApplication app = BuildMSALConfidentialClientApplication(modulePrivateData);
                     result = app.AcquireTokenForClient(GetScopes(modulePrivateData))
-                        .WithAuthority(string.Format(CultureInfo.InvariantCulture, "https://{0}", GetAuthURI(modulePrivateData)), GetTenantId(modulePrivateData))
+                        .WithTenantId(GetTenantId(modulePrivateData))
                         .ExecuteAsync()
                         .Result;
                 }
@@ -254,7 +256,7 @@ namespace Microsoft.Management.Powershell.PFXImport
                 {
                     IConfidentialClientApplication app = BuildMSALConfidentialClientApplication(modulePrivateData);
                     return app.AcquireTokenForClient(GetScopes(modulePrivateData))
-                        .WithAuthority(string.Format(CultureInfo.InvariantCulture, "https://{0}", GetAuthURI(modulePrivateData)), GetTenantId(modulePrivateData))
+                        .WithTenantId(GetTenantId(modulePrivateData))
                         .ExecuteAsync()
                         .Result;
                 }
