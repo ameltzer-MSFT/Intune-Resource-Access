@@ -140,7 +140,10 @@ function Get-IntuneGraphUri {
 
 function Get-IntuneRetryDelay {
     [CmdletBinding()]
-    param([Parameter(Mandatory)]$Exception)
+    param(
+        [Parameter(Mandatory)]$Exception,
+        [ValidateSet('Get', 'Post', 'Patch', 'Delete')][string]$Method = 'Get'
+    )
 
     $response = $Exception.Response
     if ($null -eq $response) {
@@ -149,6 +152,9 @@ function Get-IntuneRetryDelay {
 
     $statusCode = [int]$response.StatusCode
     if ($statusCode -ne 429 -and $statusCode -lt 500) {
+        return $null
+    }
+    if ($Method -eq 'Post' -and $statusCode -ne 429) {
         return $null
     }
 
@@ -208,7 +214,7 @@ function Invoke-IntuneGraphRequest {
             return Invoke-RestMethod @parameters
         }
         catch {
-            $delay = Get-IntuneRetryDelay -Exception $_.Exception
+            $delay = Get-IntuneRetryDelay -Exception $_.Exception -Method $Method
             if ($null -eq $delay -or $attempt -eq 3) {
                 throw
             }
@@ -966,9 +972,10 @@ function Set-IntuneAuthenticationToken {
         }
         Write-Host $deviceCode.message
         $deadline = [DateTimeOffset]::UtcNow.AddSeconds([int]$deviceCode.expires_in)
+        $pollingInterval = [Math]::Max(1, [int]$deviceCode.interval)
         $response = $null
         do {
-            Start-Sleep -Seconds ([Math]::Max(1, [int]$deviceCode.interval))
+            Start-Sleep -Seconds $pollingInterval
             try {
                 $response = Invoke-RestMethod -Method Post -Uri $tokenUri -Body @{
                     grant_type = 'urn:ietf:params:oauth:grant-type:device_code'; client_id = $ClientId; device_code = $deviceCode.device_code
@@ -976,6 +983,9 @@ function Set-IntuneAuthenticationToken {
             }
             catch {
                 if ($_.ErrorDetails.Message -notmatch 'authorization_pending|slow_down') { throw }
+                if ($_.ErrorDetails.Message -match 'slow_down') {
+                    $pollingInterval += 5
+                }
             }
         } while ($null -eq $response -and [DateTimeOffset]::UtcNow -lt $deadline)
         if ($null -eq $response) { throw [TimeoutException]::new('Device-code authentication timed out.') }
@@ -1580,6 +1590,9 @@ function Initialize-IntunePfxImportApplication {
     $application = @($application)
     if ($application.Count -gt 1) {
         throw [InvalidOperationException]::new('More than one application matched. Re-run with -ExistingApplicationId.')
+    }
+    if ($PSCmdlet.ParameterSetName -eq 'ByApplicationId' -and $application.Count -eq 0) {
+        throw [InvalidOperationException]::new("No application registration was found for ExistingApplicationId '$ExistingApplicationId'.")
     }
 
     $clientSecret = $null

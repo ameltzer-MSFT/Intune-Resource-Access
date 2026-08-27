@@ -54,6 +54,49 @@ Describe 'IntunePfxImport 3.0 script module' {
         }
     }
 
+    It 'restores legacy NuGet packages to the directory used by project HintPaths' {
+        $pipelinePath = Join-Path $PSScriptRoot '..\..\..\azure-pipelines.yml'
+        $pipeline = Get-Content -LiteralPath $pipelinePath -Raw
+
+        if ($pipeline -notmatch "restoreDirectory:\s*'src/PFXImportPowershell/packages'") {
+            throw 'NuGet restoreDirectory does not match the EncryptionUtilities project HintPaths.'
+        }
+    }
+
+    It 'does not retry ambiguous server errors for non-idempotent POST requests' {
+        $global:IntunePfxTestPostCount = 0
+        Mock -CommandName Start-Sleep -ModuleName IntunePfxImport {
+            throw 'A non-idempotent POST must not be retried after an ambiguous server error.'
+        }
+        Mock -CommandName Invoke-RestMethod -ModuleName IntunePfxImport {
+            param($Uri)
+            if ($Uri -match '/oauth2/v2.0/token$') {
+                return [pscustomobject]@{ access_token = 'post-retry-token'; expires_in = 3600 }
+            }
+            $global:IntunePfxTestPostCount++
+            $exception = [InvalidOperationException]::new('Ambiguous server failure.')
+            $exception | Add-Member -NotePropertyName Response -NotePropertyValue ([pscustomobject]@{
+                StatusCode = 500
+                Headers = New-Object Net.WebHeaderCollection
+            })
+            throw $exception
+        }
+        $secret = ConvertTo-SecureString 'post-retry-secret' -AsPlainText -Force
+        $certificate = [pscustomobject]@{
+            thumbprint = 'ambiguous'
+            userPrincipalName = 'user@contoso.com'
+            encryptedPfxBlob = [byte[]](1)
+            encryptedPfxPassword = 'AQ=='
+        }
+
+        Set-IntuneAuthenticationToken -ClientId '11111111-1111-1111-1111-111111111111' -TenantId '22222222-2222-2222-2222-222222222222' -ClientSecret $secret -Confirm:$false
+        Import-IntuneUserPfxCertificate -CertificateList $certificate -Confirm:$false -ErrorAction SilentlyContinue
+
+        if ($global:IntunePfxTestPostCount -ne 1) {
+            throw "Expected one POST attempt after an ambiguous server failure but got '$global:IntunePfxTestPostCount'."
+        }
+    }
+
     It 'documents all meaningful exported function parameters' {
         $commonParameters = @(
             'Verbose', 'Debug', 'ErrorAction', 'WarningAction', 'InformationAction',
@@ -344,6 +387,51 @@ Describe 'IntunePfxImport 3.0 script module' {
         Set-IntuneAuthenticationToken -Setup $setup -Confirm:$false
 
         if ($global:IntunePfxTestDevicePoll -ne 2) { throw 'Device-code authentication did not continue after authorization_pending.' }
+    }
+
+    It 'increases the device-code polling interval after slow_down' {
+        $global:IntunePfxTestDevicePoll = 0
+        $global:IntunePfxTestSleepIntervals = @()
+        Mock -CommandName Start-Sleep -ModuleName IntunePfxImport {
+            param($Seconds)
+            $global:IntunePfxTestSleepIntervals += $Seconds
+        }
+        Mock -CommandName Write-Host -ModuleName IntunePfxImport {}
+        Mock -CommandName Invoke-RestMethod -ModuleName IntunePfxImport {
+            param($Uri)
+            if ($Uri -match '/devicecode$') {
+                return [pscustomobject]@{
+                    device_code = 'device-code'
+                    expires_in = 900
+                    interval = 2
+                    message = 'Authenticate'
+                }
+            }
+            $global:IntunePfxTestDevicePoll++
+            if ($global:IntunePfxTestDevicePoll -eq 1) {
+                $record = New-Object Management.Automation.ErrorRecord(
+                    [InvalidOperationException]::new('Slow down.'),
+                    'slow_down',
+                    [Management.Automation.ErrorCategory]::NotSpecified,
+                    $null)
+                $record.ErrorDetails = New-Object Management.Automation.ErrorDetails('{"error":"slow_down"}')
+                throw $record
+            }
+            return [pscustomobject]@{ access_token = 'device-token'; expires_in = 3600 }
+        }
+
+        Set-IntuneAuthenticationToken `
+            -ClientId '11111111-1111-1111-1111-111111111111' `
+            -TenantId '22222222-2222-2222-2222-222222222222' `
+            -Confirm:$false
+
+        if (
+            $global:IntunePfxTestSleepIntervals.Count -ne 2 -or
+            $global:IntunePfxTestSleepIntervals[0] -ne 2 -or
+            $global:IntunePfxTestSleepIntervals[1] -ne 7
+        ) {
+            throw "Expected polling intervals 2 and 7 seconds but got '$($global:IntunePfxTestSleepIntervals -join ', ')'."
+        }
     }
 
     It 'preserves empty and one-character password byte arrays and rejects non-ASCII passwords' {
@@ -771,6 +859,39 @@ Describe 'IntunePfxImport 3.0 script module' {
 
         if ($result.ChangesRequiredOrApplied -notcontains 'RequiredResourceAccess') { throw 'ValidateOnly did not report missing required permissions.' }
         if ($result.ChangesRequiredOrApplied -notcontains 'PublicClient') { throw 'ValidateOnly did not report public-client configuration.' }
+    }
+
+    It 'fails when an explicit existing application ID is not found' {
+        Mock -CommandName Get-Command -ModuleName IntunePfxImport {
+            param($Name)
+            [pscustomobject]@{ Name = $Name }
+        }
+        Mock -CommandName Get-IntuneMgGraphContext -ModuleName IntunePfxImport {
+            [pscustomobject]@{ TenantId = '22222222-2222-2222-2222-222222222222' }
+        }
+        Mock -CommandName Get-IntuneMgServicePrincipal -ModuleName IntunePfxImport {
+            return $global:IntunePfxTestGraphServicePrincipal
+        }
+        Mock -CommandName Get-IntuneMgApplication -ModuleName IntunePfxImport { return @() }
+        Mock -CommandName New-IntuneMgApplication -ModuleName IntunePfxImport {
+            throw 'A missing explicit application must not create a replacement.'
+        }
+
+        $errorMessage = $null
+        try {
+            Initialize-IntunePfxImportApplication `
+                -ExistingApplicationId '33333333-3333-3333-3333-333333333333' `
+                -AuthenticationMode PublicClient `
+                -Confirm:$false
+        }
+        catch {
+            $errorMessage = $_.Exception.Message
+        }
+
+        if ($errorMessage -notlike "*No application registration was found for ExistingApplicationId*") {
+            throw "Expected a missing-application error but got: $errorMessage"
+        }
+        Assert-MockCalled -CommandName New-IntuneMgApplication -ModuleName IntunePfxImport -Times 0 -Exactly
     }
 
     It 'creates a secure one-time client secret only when requested' {
