@@ -13,7 +13,7 @@ $global:IntunePfxTestGraphServicePrincipal = [pscustomobject]@{
     )
 }
 
-Describe 'IntunePfxImport 4.0 script module' {
+Describe 'IntunePfxImport 3.0 script module' {
     BeforeAll {
         Remove-Module IntunePfxImport -ErrorAction SilentlyContinue
         Import-Module $manifestPath -Force
@@ -29,11 +29,29 @@ Describe 'IntunePfxImport 4.0 script module' {
     It 'exports the documented public function contract explicitly' {
         $manifest = Import-PowerShellDataFile -Path $manifestPath
 
-        if ($manifest.ModuleVersion -ne '4.0.1') { throw 'ModuleVersion must be 4.0.1.' }
+        if ($manifest.ModuleVersion -ne '3.0.0') { throw 'ModuleVersion must be 3.0.0.' }
         if ($manifest.RootModule -ne 'IntunePfxImport.psm1') { throw 'The manifest must load the script module.' }
         if ($manifest.FunctionsToExport -contains '*') { throw 'The manifest must not use wildcard function exports.' }
         if (@($manifest.CmdletsToExport).Count -ne 0) { throw 'The manifest must not export compiled cmdlets.' }
         if (@(Compare-Object -ReferenceObject @($manifest.FunctionsToExport) -DifferenceObject @((Get-Command -Module IntunePfxImport).Name)).Count -ne 0) { throw 'Manifest and module exports differ.' }
+
+        $version2Commands = @(
+            'Add-IntuneKspKey',
+            'ConvertTo-IntuneBase64EncodedPfxCertificate',
+            'Export-IntunePrivateKey',
+            'Export-IntunePublicKey',
+            'Get-IntuneUserId',
+            'Get-IntuneUserPfxCertificate',
+            'Import-IntunePrivateKey',
+            'Import-IntuneUserPfxCertificate',
+            'New-IntuneUserPfxCertificate',
+            'Remove-IntuneAuthenticationToken',
+            'Remove-IntuneUserPfxCertificate',
+            'Set-IntuneAuthenticationToken'
+        )
+        if (@(Compare-Object -ReferenceObject $version2Commands -DifferenceObject @($manifest.FunctionsToExport | Where-Object { $_ -ne 'Initialize-IntunePfxImportApplication' })).Count -ne 0) {
+            throw 'The shipped Version 2 command surface is not preserved.'
+        }
     }
 
     It 'documents all meaningful exported function parameters' {
@@ -184,8 +202,103 @@ Describe 'IntunePfxImport 4.0 script module' {
         if ($result.PropertyCount -ne 1) {
             throw 'The software KSP creation parameters must contain one security descriptor.'
         }
-        if ($result.Sddl -ne 'D:(A;;FA;;;BA)(A;;GR;;;SY)') {
+        if ($result.Sddl -ne 'D:(A;;FA;;;BA)(A;;GR;;;SO)(A;;GR;;;SY)') {
             throw "The connector key ACL is incorrect: $($result.Sddl)"
+        }
+    }
+
+    It 'preserves Version 2 positional metadata for local key commands' {
+        $expected = @{
+            'Add-IntuneKspKey' = @{ ProviderName = 1; KeyName = 2; KeyLength = 3 }
+            'ConvertTo-IntuneBase64EncodedPfxCertificate' = @{ CertificatePath = 1 }
+            'Export-IntunePublicKey' = @{ ProviderName = 1; KeyName = 2; FilePath = 3; FileFormat = 4 }
+            'Export-IntunePrivateKey' = @{ ProviderName = 1; KeyName = 2; FilePath = 3 }
+            'Import-IntunePrivateKey' = @{ ProviderName = 1; KeyName = 2; FilePath = 3 }
+        }
+
+        foreach ($commandName in $expected.Keys) {
+            $parameters = (Get-Command $commandName).ParameterSets[0].Parameters
+            foreach ($entry in $expected[$commandName].GetEnumerator()) {
+                $parameter = $parameters | Where-Object Name -eq $entry.Key
+                if ($parameter.Position -ne $entry.Value) {
+                    throw "Expected $commandName -$($entry.Key) at position $($entry.Value), but found $($parameter.Position)."
+                }
+            }
+        }
+    }
+
+    It 'preserves Version 2 parameter-set names for Graph list and removal commands' {
+        $getSets = @((Get-Command Get-IntuneUserPfxCertificate).ParameterSets.Name)
+        $removeSets = @((Get-Command Remove-IntuneUserPfxCertificate).ParameterSets.Name)
+
+        if ($getSets -notcontains 'FromThumbprints' -or $getSets -notcontains 'FromUsers') {
+            throw "Unexpected Get parameter sets: $($getSets -join ', ')"
+        }
+        foreach ($name in @('FromUserPFXCertificates', 'FromThumbprints', 'FromUsers')) {
+            if ($removeSets -notcontains $name) {
+                throw "Remove is missing Version 2 parameter set '$name'."
+            }
+        }
+    }
+
+    It 'accepts Version 2 purpose numbers and None padding' {
+        $module = Get-Module IntunePfxImport
+        $result = & $module {
+            $purposeMap = @{
+                '0' = 'unassigned'
+                '1' = 'smimeEncryption'
+                '2' = 'smimeSigning'
+                '4' = 'vpn'
+                '8' = 'wifi'
+            }
+            [pscustomobject]@{
+                Purposes = $purposeMap
+                Padding = Get-IntuneRsaPadding -PaddingScheme OaepSha512
+            }
+        }
+
+        if ($result.Purposes['1'] -ne 'smimeEncryption') { throw 'Version 2 purpose mapping changed.' }
+        if ($result.Padding -ne [Security.Cryptography.RSAEncryptionPadding]::OaepSHA512) { throw 'None compatibility must normalize to OAEP SHA-512.' }
+        $commandText = Get-Content -LiteralPath (Join-Path $moduleRoot 'IntunePfxImport.psm1') -Raw
+        if ($commandText -notmatch '\$paddingText -ieq ''None''') { throw 'PaddingScheme None compatibility is missing.' }
+    }
+
+    It 'remembers Version 2 provider and key values within the module session' {
+        $module = Get-Module IntunePfxImport
+        $values = & $module {
+            Resolve-IntuneEncryptionKeyParameters -ProviderName 'provider-a' -KeyName 'key-a' -ProviderNameWasBound $true -KeyNameWasBound $true | Out-Null
+            Resolve-IntuneEncryptionKeyParameters -ProviderName '' -KeyName '' -ProviderNameWasBound $false -KeyNameWasBound $false
+        }
+
+        if ($values.ProviderName -ne 'provider-a' -or $values.KeyName -ne 'key-a') {
+            throw 'Version 2 provider/key carry-forward is not preserved.'
+        }
+    }
+
+    It 'supports the deprecated Version 2 manifest authentication fallback' {
+        Mock -CommandName Invoke-RestMethod -ModuleName IntunePfxImport {
+            [pscustomobject]@{ access_token = 'legacy-token'; expires_in = 3600 }
+        }
+        $module = Get-Module IntunePfxImport
+        & $module {
+            $ExecutionContext.SessionState.Module.PrivateData.ClientId = '11111111-1111-1111-1111-111111111111'
+            $ExecutionContext.SessionState.Module.PrivateData.TenantId = '22222222-2222-2222-2222-222222222222'
+            $ExecutionContext.SessionState.Module.PrivateData.ClientSecret = 'legacy-secret'
+        }
+
+        try {
+            Set-IntuneAuthenticationToken -Confirm:$false
+            Assert-MockCalled -CommandName Invoke-RestMethod -ModuleName IntunePfxImport -Times 1 -Exactly -ParameterFilter {
+                $Body.client_id -eq '11111111-1111-1111-1111-111111111111' -and
+                $Body.grant_type -eq 'client_credentials'
+            }
+        }
+        finally {
+            & $module {
+                $ExecutionContext.SessionState.Module.PrivateData.ClientId = ''
+                $ExecutionContext.SessionState.Module.PrivateData.TenantId = ''
+                $ExecutionContext.SessionState.Module.PrivateData.ClientSecret = ''
+            }
         }
     }
 
@@ -359,12 +472,39 @@ Describe 'IntunePfxImport 4.0 script module' {
         $requestBody = $global:IntunePfxTestRequestBody | ConvertFrom-Json
 
         if ($requestBody.encryptedPfxBlob -ne 'AQID/w==') { throw 'encryptedPfxBlob must be serialized as Base64.' }
+        if ($null -ne $requestBody.PSObject.Properties['keyAlgorithm']) { throw 'keyAlgorithm is local metadata and is not valid in the Graph request body.' }
         if ($global:IntunePfxTestRequestBody -notmatch '"startDateTime"\s*:\s*"2025-01-02T03:04:05(\.0+)?Z"') {
             throw "startDateTime must be serialized as ISO-8601 UTC. Body: $global:IntunePfxTestRequestBody"
         }
         if ($global:IntunePfxTestRequestBody -notmatch '"expirationDateTime"\s*:\s*"2025-01-03T03:04:05(\.0+)?Z"') {
             throw "expirationDateTime must be serialized as ISO-8601 UTC. Body: $global:IntunePfxTestRequestBody"
         }
+    }
+
+    It 'continues an import batch after a per-record Graph failure' {
+        $global:IntunePfxTestImportCount = 0
+        Mock -CommandName Invoke-RestMethod -ModuleName IntunePfxImport {
+            param($Uri)
+            if ($Uri -match '/oauth2/v2.0/token$') {
+                return [pscustomobject]@{ access_token = 'batch-token'; expires_in = 3600 }
+            }
+            $global:IntunePfxTestImportCount++
+            if ($global:IntunePfxTestImportCount -eq 1) {
+                throw [InvalidOperationException]::new('First record failed.')
+            }
+            return [pscustomobject]@{ id = 'second-record' }
+        }
+        $secret = ConvertTo-SecureString 'batch-secret' -AsPlainText -Force
+        $certificates = @(
+            [pscustomobject]@{ thumbprint = 'first'; userPrincipalName = 'first@contoso.com'; encryptedPfxBlob = [byte[]](1); encryptedPfxPassword = 'AQ==' },
+            [pscustomobject]@{ thumbprint = 'second'; userPrincipalName = 'second@contoso.com'; encryptedPfxBlob = [byte[]](2); encryptedPfxPassword = 'Ag==' }
+        )
+        Set-IntuneAuthenticationToken -ClientId '11111111-1111-1111-1111-111111111111' -TenantId '22222222-2222-2222-2222-222222222222' -ClientSecret $secret -Confirm:$false
+
+        Import-IntuneUserPfxCertificate -CertificateList $certificates -Confirm:$false -ErrorAction SilentlyContinue -ErrorVariable importErrors
+
+        if ($global:IntunePfxTestImportCount -ne 2) { throw 'Import stopped after the first record failure.' }
+        if (@($importErrors).Count -lt 1) { throw 'Import did not surface the per-record error.' }
     }
 
     It 'follows Graph continuation links without changing endpoints' {
@@ -391,6 +531,64 @@ Describe 'IntunePfxImport 4.0 script module' {
         if ($result.Count -ne 2 -or $result[0].thumbprint -ne 'first' -or $result[1].thumbprint -ne 'second') {
             throw 'Graph continuation pages were not returned in order.'
         }
+    }
+
+    It 'normalizes Graph responses to the Version 2 PascalCase object shape' {
+        Mock -CommandName Invoke-RestMethod -ModuleName IntunePfxImport {
+            param($Uri)
+            if ($Uri -match '/oauth2/v2.0/token$') {
+                return [pscustomobject]@{ access_token = 'shape-token'; expires_in = 3600 }
+            }
+            return [pscustomobject]@{ value = @([pscustomobject]@{
+                thumbprint = 'abc'
+                userPrincipalName = 'user@contoso.com'
+                encryptedPfxBlob = 'AQID'
+                startDateTime = '2025-01-02T03:04:05Z'
+            }) }
+        }
+        $secret = ConvertTo-SecureString 'shape-secret' -AsPlainText -Force
+        Set-IntuneAuthenticationToken -ClientId '11111111-1111-1111-1111-111111111111' -TenantId '22222222-2222-2222-2222-222222222222' -ClientSecret $secret -Confirm:$false
+
+        $result = Get-IntuneUserPfxCertificate
+
+        if ($result.PSObject.TypeNames[0] -ne 'Microsoft.Management.Services.Api.UserPFXCertificate') { throw 'Legacy type name is missing.' }
+        if ($result.PSObject.Properties.Name -notcontains 'UserPrincipalName') { throw 'PascalCase properties are missing.' }
+        if ($result.EncryptedPfxBlob -isnot [byte[]] -or $result.EncryptedPfxBlob.Length -ne 3) { throw 'Graph Base64 was not restored to byte[].' }
+        if ($result.StartDateTime -isnot [DateTimeOffset]) { throw 'Graph dates were not restored to DateTimeOffset.' }
+    }
+
+    It 'accepts a Version 2 directory user ID for direct removal' {
+        $global:IntunePfxTestDeleteUri = $null
+        Mock -CommandName Invoke-RestMethod -ModuleName IntunePfxImport {
+            param($Method, $Uri)
+            if ($Uri -match '/oauth2/v2.0/token$') {
+                return [pscustomobject]@{ access_token = 'remove-token'; expires_in = 3600 }
+            }
+            $global:IntunePfxTestDeleteUri = $Uri
+        }
+        $secret = ConvertTo-SecureString 'remove-secret' -AsPlainText -Force
+        Set-IntuneAuthenticationToken -ClientId '11111111-1111-1111-1111-111111111111' -TenantId '22222222-2222-2222-2222-222222222222' -ClientSecret $secret -Confirm:$false
+
+        Remove-IntuneUserPfxCertificate -UserThumbprintList @{
+            User = '0123456789abcdef0123456789abcdef'
+            Thumbprint = 'aabbcc'
+        } -Confirm:$false
+
+        if ($global:IntunePfxTestDeleteUri -notlike '*/0123456789abcdef0123456789abcdef-aabbcc') {
+            throw "Directory user ID was not used directly: $global:IntunePfxTestDeleteUri"
+        }
+    }
+
+    It 'ships a parseable, clearly marked non-production E2E sample' {
+        $samplePath = Join-Path $PSScriptRoot '..\Examples\Test-IntunePfxImportE2E.ps1'
+        $tokens = $null
+        $errors = $null
+        [Management.Automation.Language.Parser]::ParseFile($samplePath, [ref]$tokens, [ref]$errors) | Out-Null
+        $sampleText = Get-Content -LiteralPath $samplePath -Raw
+
+        if (@($errors).Count -ne 0) { throw "E2E sample parser errors: $($errors.Message -join '; ')" }
+        if ($sampleText -notmatch 'NOT FOR PRODUCTION USE') { throw 'E2E sample lacks the non-production disclaimer.' }
+        if ($sampleText -notmatch "\[version\]'3\.0\.0'") { throw 'E2E sample does not require Version 3.0.0.' }
     }
 
     It 'preserves sovereign cloud AuthUri and GraphUri selections' {
@@ -671,16 +869,20 @@ Describe 'IntunePfxImport 4.0 script module' {
             $rsa = [Security.Cryptography.RSA]::Create(2048)
             $base64 = [Convert]::ToBase64String($rsa.ExportSubjectPublicKeyInfo())
             $pem = "-----BEGIN PUBLIC KEY-----`n" + (($base64 -split '(.{1,64})' | Where-Object { $_ }) -join "`n") + "`n-----END PUBLIC KEY-----`n"
-            $keyPath = Join-Path $TestDrive 'public.pem'
+            $keyPath = Join-Path $TestDrive 'public.key'
             [IO.File]::WriteAllText($keyPath, $pem)
             $password = ConvertTo-SecureString $passwordText -AsPlainText -Force
 
-            $result = New-IntuneUserPfxCertificate -PathToPfxFile $pfxPath -PfxPassword $password -KeyFilePath $keyPath
+            $result = New-IntuneUserPfxCertificate -PathToPfxFile $pfxPath -PfxPassword $password -KeyFilePath $keyPath -IntendedPurpose 1 -PaddingScheme None
 
             if ($result.keyAlgorithm -ne 'ecc') { throw "Expected ECC keyAlgorithm but got '$($result.keyAlgorithm)'." }
             if ($result.userPrincipalName -ne 'user@contoso.com') { throw 'The UPN was not inferred from the certificate email name.' }
             if ($result.paddingScheme -ne 'oaepSha512') { throw 'Expected OAEP SHA-512 padding.' }
+            if ($result.intendedPurpose -ne 'smimeEncryption') { throw 'Version 2 numeric intended purpose was not normalized.' }
             if ([string]::IsNullOrWhiteSpace($result.encryptedPfxPassword)) { throw 'The PFX password was not encrypted.' }
+            if ($result.StartDateTime -isnot [DateTimeOffset] -or $result.ExpirationDateTime -isnot [DateTimeOffset]) {
+                throw 'Version 2 certificate dates must remain DateTimeOffset values.'
+            }
         }
     }
 }

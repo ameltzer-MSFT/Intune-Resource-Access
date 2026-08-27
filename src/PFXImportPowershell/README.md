@@ -1,24 +1,85 @@
 # Intune PFX Import PowerShell module
 
-Version 4.0 is a PowerShell script module for creating and managing Microsoft Intune `userPFXCertificate` records. It no longer builds, loads, or exports compiled PowerShell cmdlets. The retained `EncryptionUtilities` project is used only by `OnPremValidation`; it is not a module dependency.
+Version 3.0 ports the shipped Version 2 compiled cmdlets to a PowerShell script
+module. Existing command names and common invocation patterns remain available.
+Version 3 adds PowerShell 7 support, ECC certificate handling, command-line
+configuration, and Entra application onboarding.
+
+`EncryptionUtilities` remains only for `OnPremValidation`; it is not a module
+dependency.
 
 ## Requirements
 
 - Windows PowerShell 5.1 with .NET Framework 4.7.2, or PowerShell 7 on Windows.
-- A Microsoft Entra application registration with `DeviceManagementConfiguration.ReadWrite.All`, `User.Read.All`, and (for delegated authentication) `User.Read`. Grant admin consent.
-- A Windows CNG provider for local key operations. `Microsoft Software Key Storage Provider` is suitable for development. Run operational key commands under an account permitted to use the machine key.
+- An Entra application with `DeviceManagementConfiguration.ReadWrite.All`,
+  `User.Read.All`, and, for delegated authentication, `User.Read`.
+- Admin consent for the required Graph permissions.
+- A Windows CNG provider and machine key accessible to the Intune Certificate
+  Connector. `Microsoft Software Key Storage Provider` is suitable for testing.
 
-The module runs under PowerShell 7, but CNG key operations are Windows-only. No credentials, tenant settings, or cloud endpoints are stored in the manifest.
+CNG key operations are Windows-only. Run key creation and import from an
+elevated PowerShell session.
 
-## One-command Entra application onboarding
+## Quick start
 
-Version 4.0 can create or validate the tenant-specific application registration instead of requiring manual manifest edits. The onboarding function uses the current Microsoft Graph PowerShell SDK (`Microsoft.Graph.Authentication` and `Microsoft.Graph.Applications`), not AzureAD or MSOnline cmdlets.
+```powershell
+Import-Module .\PFXImportPS\IntunePfxImport.psd1
 
-The operator needs a Graph SDK connection with `Application.ReadWrite.All` and `Application.Read.All`. Application Administrator or Cloud Application Administrator can create and configure an app registration. When `ClientSecret` or `Both` configures Microsoft Graph **application permissions**, only a Privileged Role Administrator or Global Administrator can grant tenant-wide admin consent.
+$setup = Initialize-IntunePfxImportApplication `
+    -DisplayName 'Intune PFX Import' `
+    -AuthenticationMode PublicClient `
+    -ConnectGraph
+
+Set-IntuneAuthenticationToken -Setup $setup
+
+Add-IntuneKspKey `
+    -ProviderName 'Microsoft Software Key Storage Provider' `
+    -KeyName 'PfxImportKey'
+
+$pfxPassword = Read-Host 'PFX password' -AsSecureString
+$record = New-IntuneUserPfxCertificate `
+    -PathToPfxFile .\user.pfx `
+    -PfxPassword $pfxPassword `
+    -UPN user@contoso.com `
+    -ProviderName 'Microsoft Software Key Storage Provider' `
+    -KeyName 'PfxImportKey' `
+    -IntendedPurpose smimeEncryption
+
+Import-IntuneUserPfxCertificate -CertificateList $record
+Get-IntuneUserPfxCertificate -UserList user@contoso.com
+```
+
+`$setup` contains the application, tenant, cloud, schema, redirect, and
+authentication-mode settings needed by `Set-IntuneAuthenticationToken`. Pass it
+directly--do not unpack it into separate arguments.
+
+## Operator identity and target UPN
+
+These are different identities:
+
+- **Operator identity** -- the account or application authenticating to Graph.
+- **Target UPN** -- the existing Entra user that receives the imported
+  certificate record.
+
+`-UPN` does not control authentication. It must identify a user in the tenant
+where the operator authenticated. It can be omitted when the PFX certificate
+contains a UPN or email Subject Alternative Name.
+
+Validate the target before import:
+
+```powershell
+Get-IntuneUserId -UPN user@contoso.com
+```
+
+## Entra application onboarding
+
+`Initialize-IntunePfxImportApplication` creates or validates the tenant-specific
+application through `Microsoft.Graph.Authentication` and
+`Microsoft.Graph.Applications`. The operator needs `Application.ReadWrite.All`
+and `Application.Read.All`.
 
 ```powershell
 Install-Module Microsoft.Graph -Scope CurrentUser
-Import-Module .\PFXImportPS\IntunePfxImport.psd1
 
 $setup = Initialize-IntunePfxImportApplication `
     -DisplayName 'Intune PFX Import' `
@@ -27,17 +88,15 @@ $setup = Initialize-IntunePfxImportApplication `
     -ConnectGraph
 ```
 
-The function creates or reuses an app registration and service principal, configures application `DeviceManagementConfiguration.ReadWrite.All` and `User.Read.All`, and configures delegated `DeviceManagementConfiguration.ReadWrite.All`, `User.Read.All`, and `User.Read` when `PublicClient` or `Both` is selected. It also configures the native redirect URI and public-client flow for device-code and legacy ROPC compatibility. An exact display-name match is reused; multiple matches cause an error. Use `-ExistingApplicationId` to select an existing registration deterministically.
+An exact display-name match is reused. Multiple matches cause an error. Use
+`-ExistingApplicationId` to select an application deterministically.
 
-The Graph SDK caller cannot silently grant admin consent. For `ClientSecret` or `Both`, open `$setup.AdminConsentUri` as a Privileged Role Administrator or Global Administrator, review the requested permissions, and grant consent before importing certificates. Delegated-only configurations can use an appropriately authorized tenant administrator when consent is required.
+For application permissions, a Privileged Role Administrator or Global
+Administrator must open `$setup.AdminConsentUri`, review the permissions, and
+grant tenant-wide consent. The Graph SDK cannot silently grant consent.
 
-After consent, pass the setup object directly to authentication. When `-CreateClientSecret` was requested, authentication uses its one-time `SecureString` secret. Otherwise, it starts device-code authentication:
-
-```powershell
-Set-IntuneAuthenticationToken -Setup $setup
-```
-
-For an existing registration, use its client ID. `-ValidateOnly` is read-only and reports missing permissions, public-client configuration, or service principal creation without changing the tenant:
+`-ValidateOnly` reports missing permissions, public-client configuration, and
+service-principal creation without changing the tenant:
 
 ```powershell
 Initialize-IntunePfxImportApplication `
@@ -46,7 +105,7 @@ Initialize-IntunePfxImportApplication `
     -ValidateOnly
 ```
 
-For GCC High, use the sovereign cloud endpoints in both onboarding and authentication:
+For GCC High, use the matching endpoints during onboarding and authentication:
 
 ```powershell
 $setup = Initialize-IntunePfxImportApplication `
@@ -58,17 +117,9 @@ $setup = Initialize-IntunePfxImportApplication `
 Set-IntuneAuthenticationToken -Setup $setup
 ```
 
-Imported PFX certificates require the Certificate Connector to access the private key that protects imported PFX passwords. See [Configure and use imported PKCS certificates with Intune](https://learn.microsoft.com/intune/device-configuration/certificates/imported-pfx-profiles).
+## Authentication options
 
-## Install and authenticate
-
-Import the script module directly:
-
-```powershell
-Import-Module .\PFXImportPS\IntunePfxImport.psd1
-```
-
-All app and cloud settings are command-line parameters. Commercial-cloud defaults are safe for `AuthUri`, `GraphUri`, `SchemaVersion`, and `RedirectUri`. Prefer `-Setup $setup`; use the explicit parameters below for an existing registration or unattended automation that does not use the onboarding function.
+Prefer a setup object. For an existing unattended application:
 
 ```powershell
 $clientSecret = Read-Host 'Application client secret' -AsSecureString
@@ -78,92 +129,160 @@ Set-IntuneAuthenticationToken `
     -ClientSecret $clientSecret
 ```
 
-For delegated device-code authentication, omit `ClientSecret`. `AdminUserName` is accepted as a login hint. Username/password authentication remains available only for existing ROPC integrations and is discouraged.
-
-```powershell
-Set-IntuneAuthenticationToken -ClientId '<application-client-id>' -TenantId '<tenant-id>' -AdminUserName 'admin@contoso.com'
-```
-
-Government cloud uses its own authority and Graph host:
+For device-code authentication, omit `ClientSecret`. `AdminUserName` is an
+operator login hint. Username/password authentication remains available for
+existing ROPC integrations but is discouraged.
 
 ```powershell
 Set-IntuneAuthenticationToken `
     -ClientId '<application-client-id>' `
     -TenantId '<tenant-id>' `
-    -ClientSecret $clientSecret `
-    -AuthUri 'login.microsoftonline.us' `
-    -GraphUri 'https://graph.microsoft.us'
+    -AdminUserName admin@contoso.com
 ```
 
-Run `Remove-IntuneAuthenticationToken` when finished. The auth context is session-only.
+Version 2 manifest `PrivateData` keys remain as a migration fallback:
+`ClientId`, `ClientSecret`, `TenantId`, `AuthURI`, `GraphURI`,
+`SchemaVersion`, and `RedirectURI`. Existing scripts can still call
+`Set-IntuneAuthenticationToken -AdminUserName ...` or, when all application
+credentials are configured, `Set-IntuneAuthenticationToken` with no arguments.
+Do not store new secrets in the manifest--use `-Setup` or command-line
+`SecureString` input.
 
-## Local CNG key operations
+Run `Remove-IntuneAuthenticationToken` when finished. Authentication state is
+kept only in the current module session.
 
-These state-changing commands support `-WhatIf` and `-Confirm`.
-Create the machine key once on the computer that performs password encryption, from an elevated session. `New-IntuneUserPfxCertificate` does not create a missing key implicitly.
+## CNG encryption key
+
+The CNG key does not replace the private key inside the imported PFX. It encrypts
+the PFX password so the Certificate Connector can decrypt and install the PFX.
+Create the machine key once on the encryption computer:
 
 ```powershell
 Add-IntuneKspKey `
     -ProviderName 'Microsoft Software Key Storage Provider' `
     -KeyName 'PfxImportKey'
+```
 
+The software-provider ACL grants built-in Administrators full control and
+Server Operators and Local System read access. Confirm that the connector
+service identity can open the selected provider and key.
+
+Provider and key values supplied to `New-IntuneUserPfxCertificate` are remembered
+for later calls in the same module session, matching Version 2 behavior.
+
+For encryption on a different computer, export the public key:
+
+```powershell
 Export-IntunePublicKey `
     -ProviderName 'Microsoft Software Key Storage Provider' `
     -KeyName 'PfxImportKey' `
     -FilePath .\PfxImportKey.pem `
     -FileFormat Pem
-```
 
-`Export-IntunePrivateKey` and `Import-IntunePrivateKey` support connector migration using the historical `RSAFULLPRIVATEBLOB` format. Treat exported private-key files as secrets.
-
-## Create and import a PFX record
-
-The module loads PFX data with `EphemeralKeySet`; it does not write the PFX private key to a certificate store. It detects the certificate public-key algorithm and writes `rsa`, `ecc`, or `unknown` in `keyAlgorithm`. The encryption key remains RSA because it protects the PFX password, not the PFX private key.
-
-PFX passwords must contain only ASCII characters. The Intune Certificate Connector decodes the decrypted password as ASCII, so the module rejects non-ASCII passwords instead of silently changing them.
-
-`UPN` is optional when the PFX contains a UPN or email name. Supply `-UPN` only when the certificate does not encode the target Intune user.
-
-The authenticated account is the operator and is not assumed to be the certificate recipient.
-
-```powershell
-$pfxPassword = Read-Host 'PFX password' -AsSecureString
-$record = New-IntuneUserPfxCertificate `
-    -PathToPfxFile .\user.pfx `
-    -PfxPassword $pfxPassword `
-    -ProviderName 'Microsoft Software Key Storage Provider' `
-    -KeyName 'PfxImportKey' `
-    -IntendedPurpose smimeEncryption `
-    -PaddingScheme OaepSha512
-
-Import-IntuneUserPfxCertificate -CertificateList $record
-```
-
-For encryption away from the connector, use an exported CNG blob or PEM public key:
-
-```powershell
 $record = New-IntuneUserPfxCertificate `
     -PathToPfxFile .\user.pfx `
     -PfxPassword $pfxPassword `
     -KeyFilePath .\PfxImportKey.pem
 ```
 
-Use `Get-IntuneUserPfxCertificate`, `Get-IntuneUserId`, `Import-IntuneUserPfxCertificate -IsUpdate`, and `Remove-IntuneUserPfxCertificate` for Graph CRUD.
+PEM content is detected regardless of file extension. Public CNG blobs use
+`RSAPUBLICBLOB`. Private-key migration retains the Version 2
+`RSAFULLPRIVATEBLOB` format. Treat exported private-key files as secrets.
 
-Relative input and output paths such as `.\user.pfx` and `.\PfxImportKey.pem` resolve from the caller's current PowerShell location.
+## Create, import, verify, and remove
 
-## Migration from 3.0
+The module loads PFX data with `EphemeralKeySet`; it does not install the PFX
+private key into a certificate store. PFX passwords must contain only ASCII
+characters because the Certificate Connector decodes the decrypted password as
+ASCII.
 
-- Replace the built DLL import with `Import-Module .\PFXImportPS\IntunePfxImport.psd1`.
-- Remove all `PrivateData` values from `IntunePfxImport.psd1`. Use `Set-IntuneAuthenticationToken -Setup $setup`, or pass `ClientId`, `TenantId`, and `ClientSecret` explicitly for an existing automation flow.
-- Replace manual Entra application setup with `Initialize-IntunePfxImportApplication`, grant consent through its `AdminConsentUri`, then pass the result directly to `Set-IntuneAuthenticationToken -Setup`.
-- Pass sovereign-cloud `AuthUri` and `GraphUri` to `Set-IntuneAuthenticationToken`; do not edit or copy a government-cloud manifest.
-- Existing public command names, CNG blob formats, PEM public-key support, Graph resource paths, `-IsUpdate`, padding values, and PFX object fields remain available.
-- `Set-IntuneAuthenticationToken` caches only session state. Reauthenticate after a user token expires.
+The local object reports `KeyAlgorithm` as `rsa`, `ecc`, or `unknown`.
+`keyAlgorithm` is not part of the Graph `userPFXCertificate` schema and is not
+sent during import.
+
+Version 2 purpose numbers remain accepted:
+
+| Value | Purpose |
+| --- | --- |
+| `0` | `unassigned` |
+| `1` | `smimeEncryption` |
+| `2` | `smimeSigning` |
+| `4` | `vpn` |
+| `8` | `wifi` |
+
+`-PaddingScheme None` remains a compatibility alias for `OaepSha512`.
+
+Verify an import by UPN and thumbprint:
+
+```powershell
+$persisted = Get-IntuneUserPfxCertificate -UserThumbprintList @{
+    User = $record.UserPrincipalName
+    Thumbprint = $record.Thumbprint
+}
+```
+
+Graph intentionally redacts sensitive fields on read-back:
+
+- `EncryptedPfxBlob` appears as the Base64 value `AA==`.
+- `EncryptedPfxPassword` is empty.
+
+Those values do not mean the import failed. Verify the UPN, thumbprint, intended
+purpose, and dates instead.
+
+Removal accepts either the Version 2 directory user ID or a UPN in each
+`UserThumbprintList.User` value:
+
+```powershell
+Remove-IntuneUserPfxCertificate -UserThumbprintList @{
+    User = $record.UserPrincipalName
+    Thumbprint = $record.Thumbprint
+}
+```
+
+Import and removal continue to later records after an item failure. Use
+`-ErrorAction Stop` when the caller needs fail-fast behavior. State-changing
+commands support `-WhatIf` and `-Confirm`.
+
+Relative paths resolve from the caller's current PowerShell location.
+
+## Version 2 compatibility
+
+Version 3 preserves:
+
+- All 12 shipped Version 2 command names.
+- Existing positional indexes and pipeline input.
+- Existing parameter-set names for list and removal operations.
+- CNG `RSAPUBLICBLOB`, PEM, and `RSAFULLPRIVATEBLOB` formats.
+- Version 2 intended-purpose numbers and `PaddingScheme None`.
+- Provider/key carry-forward within a module session.
+- Manifest-based authentication as a deprecated migration fallback.
+- PascalCase PFX object properties and the
+  `Microsoft.Management.Services.Api.UserPFXCertificate` PowerShell type name.
+- Graph paths, update behavior, and per-record batch continuation.
+
+The old compiled CLR classes and enums are not loaded. Scripts should use
+properties rather than static CLR casts. `Initialize-IntunePfxImportApplication`,
+setup-object authentication, UPN inference, ECC metadata, safer path handling,
+bounded retries, and `WhatIf` support are Version 3 extensions.
+
+## Non-production E2E sample
+
+`Examples\Test-IntunePfxImportE2E.ps1` demonstrates the full workflow against a
+live tenant.
+
+```powershell
+.\Examples\Test-IntunePfxImportE2E.ps1 -TargetUpn user@contoso.com
+```
+
+**Do not use this sample as production automation.** It requires elevated
+PowerShell 7, can install Graph modules, creates or reuses an Entra application,
+creates a machine key and temporary ECC PFX file, and writes an Intune PFX
+record. By default it removes the key, PFX file, and Intune record. The Entra
+application remains for reuse. `-KeepArtifacts` retains the machine key and
+Intune record, but the temporary PFX file is always deleted. It also retains the
+authentication context for inspection.
 
 ## Tests
-
-Run isolated Pester tests without administrator access, a certificate store, network access, or credentials:
 
 ```powershell
 Invoke-Pester .\Tests\IntunePfxImport.Tests.ps1 -Output Detailed

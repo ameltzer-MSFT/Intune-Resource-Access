@@ -53,6 +53,7 @@ steps:
       **/OnPremValidation/**/bin/**/$(BuildConfiguration)/**/?(*.exe|*.dll|*.xml|*.pdb)
       **/PFXImportPS/*.psd1
       **/PFXImportPS/*.psm1
+      **/Examples/*.ps1
     TargetFolder: '$(Build.ArtifactStagingDirectory)'
 
 - task: CodeSignValidationInjected@1

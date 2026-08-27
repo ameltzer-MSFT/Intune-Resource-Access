@@ -4,6 +4,34 @@ $script:AuthContext = $null
 $script:CommercialAuthUri = 'login.microsoftonline.com'
 $script:CommercialGraphUri = 'https://graph.microsoft.com'
 $script:DefaultRedirectUri = 'https://login.microsoftonline.com/common/oauth2/nativeclient'
+$script:DefaultProviderName = $null
+$script:DefaultKeyName = $null
+
+function Get-IntuneLegacyModuleConfiguration {
+    [CmdletBinding()]
+    param()
+
+    $privateData = $ExecutionContext.SessionState.Module.PrivateData
+    if ($privateData -is [Collections.IDictionary]) {
+        return $privateData
+    }
+    return @{}
+}
+
+function Get-IntuneLegacyConfigurationValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][Collections.IDictionary]$Configuration,
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    foreach ($key in $Configuration.Keys) {
+        if ([string]$key -ieq $Name) {
+            return $Configuration[$key]
+        }
+    }
+    return $null
+}
 
 function ConvertTo-PlainText {
     [CmdletBinding()]
@@ -168,6 +196,7 @@ function Invoke-IntuneGraphRequest {
         Uri = $uri
         Headers = $headers
         ErrorAction = 'Stop'
+        TimeoutSec = 30
     }
     if ($PSBoundParameters.ContainsKey('Body')) {
         $parameters.Body = $Body | ConvertTo-Json -Depth 8
@@ -195,7 +224,7 @@ function ConvertTo-IntuneUserPfxBody {
 
     $body = [ordered]@{}
     foreach ($property in @(
-        'id', 'thumbprint', 'keyAlgorithm', 'intendedPurpose', 'userPrincipalName',
+        'id', 'thumbprint', 'intendedPurpose', 'userPrincipalName',
         'startDateTime', 'expirationDateTime', 'providerName', 'keyName',
         'paddingScheme', 'encryptedPfxBlob', 'encryptedPfxPassword',
         'createdDateTime', 'lastModifiedDateTime'
@@ -221,6 +250,77 @@ function ConvertTo-IntuneUserPfxBody {
         }
     }
     return [pscustomobject]$body
+}
+
+function ConvertFrom-IntuneUserPfxResponse {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Certificate)
+
+    $properties = [ordered]@{}
+    foreach ($property in @(
+        'Id', 'Thumbprint', 'IntendedPurpose', 'UserPrincipalName',
+        'StartDateTime', 'ExpirationDateTime', 'ProviderName', 'KeyName',
+        'PaddingScheme', 'EncryptedPfxBlob', 'EncryptedPfxPassword',
+        'CreatedDateTime', 'LastModifiedDateTime'
+    )) {
+        $sourceName = $property.Substring(0, 1).ToLowerInvariant() + $property.Substring(1)
+        $source = $Certificate.PSObject.Properties[$sourceName]
+        if ($null -eq $source) {
+            $source = $Certificate.PSObject.Properties[$property]
+        }
+        $value = if ($null -ne $source) { $source.Value } else { $null }
+        if ($property -eq 'EncryptedPfxBlob' -and $value -is [string]) {
+            $value = [Convert]::FromBase64String($value)
+        }
+        elseif (
+            $property -in @('StartDateTime', 'ExpirationDateTime', 'CreatedDateTime', 'LastModifiedDateTime') -and
+            $null -ne $value -and
+            $value -isnot [DateTimeOffset]
+        ) {
+            $value = [DateTimeOffset]::Parse(
+                [string]$value,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::RoundtripKind)
+        }
+        $properties[$property] = $value
+    }
+
+    $result = [pscustomobject]$properties
+    $result.PSObject.TypeNames.Insert(
+        0,
+        'Microsoft.Management.Services.Api.UserPFXCertificate')
+    return $result
+}
+
+function Resolve-IntuneEncryptionKeyParameters {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()][string]$ProviderName,
+        [AllowEmptyString()][string]$KeyName,
+        [Parameter(Mandatory)][bool]$ProviderNameWasBound,
+        [Parameter(Mandatory)][bool]$KeyNameWasBound
+    )
+
+    if ($ProviderNameWasBound -and -not [string]::IsNullOrWhiteSpace($ProviderName)) {
+        $script:DefaultProviderName = $ProviderName
+        Set-Variable -Name EncryptPFXFilesProviderName -Value $ProviderName -Scope Script
+    }
+    elseif ([string]::IsNullOrWhiteSpace($ProviderName)) {
+        $ProviderName = $script:DefaultProviderName
+    }
+
+    if ($KeyNameWasBound -and -not [string]::IsNullOrWhiteSpace($KeyName)) {
+        $script:DefaultKeyName = $KeyName
+        Set-Variable -Name EncryptPFXFilesKeyName -Value $KeyName -Scope Script
+    }
+    elseif ([string]::IsNullOrWhiteSpace($KeyName)) {
+        $KeyName = $script:DefaultKeyName
+    }
+
+    return [pscustomobject]@{
+        ProviderName = $ProviderName
+        KeyName = $KeyName
+    }
 }
 
 function Escape-IntuneODataLiteral {
@@ -424,12 +524,14 @@ function Invoke-IntunePasswordEncryption {
         $key = $null
         $rsa = $null
         try {
-            if ([IO.Path]::GetExtension($resolvedKeyFilePath) -ieq '.pem') {
+            $keyBytes = [IO.File]::ReadAllBytes($resolvedKeyFilePath)
+            $keyText = [Text.Encoding]::ASCII.GetString($keyBytes)
+            if ($keyText -match '-----BEGIN PUBLIC KEY-----') {
                 $rsa = Get-RsaFromPemFile -Path $resolvedKeyFilePath
             }
             else {
                 $key = [Security.Cryptography.CngKey]::Import(
-                    [IO.File]::ReadAllBytes($resolvedKeyFilePath),
+                    $keyBytes,
                     [Security.Cryptography.CngKeyBlobFormat]::new('RSAPUBLICBLOB'))
                 $rsa = New-Object Security.Cryptography.RSACng($key)
             }
@@ -481,7 +583,7 @@ function Add-IntuneConnectorKeyAccess {
     }
 
     $security = [Security.AccessControl.RawSecurityDescriptor]::new(
-        'D:(A;;FA;;;BA)(A;;GR;;;SY)')
+        'D:(A;;FA;;;BA)(A;;GR;;;SO)(A;;GR;;;SY)')
     [byte[]]$securityDescriptor = New-Object byte[] $security.BinaryLength
     $security.GetBinaryForm($securityDescriptor, 0)
     $daclSecurityInformation = [Security.Cryptography.CngPropertyOptions]4
@@ -510,15 +612,21 @@ function Add-IntuneKspKey {
     #>
     [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
     param(
-        [Parameter(Mandatory, Position = 0)][ValidateNotNullOrEmpty()][string]$ProviderName,
-        [Parameter(Mandatory, Position = 1)][ValidateNotNullOrEmpty()][string]$KeyName,
-        [ValidateRange(2048, 16384)][int]$KeyLength = 2048,
+        [Parameter(Mandatory, Position = 1)][ValidateNotNullOrEmpty()][string]$ProviderName,
+        [Parameter(Mandatory, Position = 2)][ValidateNotNullOrEmpty()][string]$KeyName,
+        [Parameter(Position = 3)][ValidateRange(2048, 16384)][int]$KeyLength = 2048,
         [switch]$MakeExportable
     )
 
     $provider = New-Object Security.Cryptography.CngProvider($ProviderName)
     if ([Security.Cryptography.CngKey]::Exists($KeyName, $provider, [Security.Cryptography.CngKeyOpenOptions]::MachineKey)) {
-        throw [InvalidOperationException]::new("CNG key '$KeyName' already exists in '$ProviderName'.")
+        $exception = [InvalidOperationException]::new("CNG key '$KeyName' already exists in '$ProviderName'.")
+        $PSCmdlet.WriteError([Management.Automation.ErrorRecord]::new(
+            $exception,
+            'IntunePfxImportKeyAlreadyExists',
+            [Management.Automation.ErrorCategory]::ResourceExists,
+            $KeyName))
+        return
     }
     if ($PSCmdlet.ShouldProcess("$ProviderName\$KeyName", 'Create machine RSA key')) {
         $parameters = New-Object Security.Cryptography.CngKeyCreationParameters
@@ -548,7 +656,7 @@ function ConvertTo-IntuneBase64EncodedPfxCertificate {
     ConvertTo-IntuneBase64EncodedPfxCertificate -CertificatePath .\user.pfx
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory, Position = 0)][string]$CertificatePath)
+    param([Parameter(Mandatory, Position = 1)][string]$CertificatePath)
     $resolvedCertificatePath = Resolve-IntuneFileSystemPath -Path $CertificatePath -MustExist
     [Convert]::ToBase64String([IO.File]::ReadAllBytes($resolvedCertificatePath))
 }
@@ -572,10 +680,10 @@ function Export-IntunePublicKey {
     #>
     [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
     param(
-        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$ProviderName,
-        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$KeyName,
-        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$FilePath,
-        [ValidateSet('CngBlob', 'Pem')][string]$FileFormat = 'CngBlob'
+        [Parameter(Mandatory, Position = 1)][ValidateNotNullOrEmpty()][string]$ProviderName,
+        [Parameter(Mandatory, Position = 2)][ValidateNotNullOrEmpty()][string]$KeyName,
+        [Parameter(Mandatory, Position = 3)][ValidateNotNullOrEmpty()][string]$FilePath,
+        [Parameter(Position = 4)][ValidateSet('CngBlob', 'Pem')][string]$FileFormat = 'CngBlob'
     )
 
     $resolvedFilePath = Resolve-IntuneFileSystemPath -Path $FilePath
@@ -613,11 +721,11 @@ function Export-IntunePrivateKey {
     .EXAMPLE
     Export-IntunePrivateKey -ProviderName 'Microsoft Software Key Storage Provider' -KeyName PfxImportKey -FilePath .\key.bin
     #>
-    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
     param(
-        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$ProviderName,
-        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$KeyName,
-        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$FilePath
+        [Parameter(Mandatory, Position = 1)][ValidateNotNullOrEmpty()][string]$ProviderName,
+        [Parameter(Mandatory, Position = 2)][ValidateNotNullOrEmpty()][string]$KeyName,
+        [Parameter(Mandatory, Position = 3)][ValidateNotNullOrEmpty()][string]$FilePath
     )
 
     $resolvedFilePath = Resolve-IntuneFileSystemPath -Path $FilePath
@@ -646,18 +754,24 @@ function Import-IntunePrivateKey {
     .EXAMPLE
     Import-IntunePrivateKey -ProviderName 'Microsoft Software Key Storage Provider' -KeyName PfxImportKey -FilePath .\key.bin
     #>
-    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
     param(
-        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$ProviderName,
-        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$KeyName,
-        [Parameter(Mandatory)][string]$FilePath,
+        [Parameter(Mandatory, Position = 1)][ValidateNotNullOrEmpty()][string]$ProviderName,
+        [Parameter(Mandatory, Position = 2)][ValidateNotNullOrEmpty()][string]$KeyName,
+        [Parameter(Mandatory, Position = 3)][string]$FilePath,
         [switch]$MakeExportable
     )
 
     $resolvedFilePath = Resolve-IntuneFileSystemPath -Path $FilePath -MustExist
     $provider = New-Object Security.Cryptography.CngProvider($ProviderName)
     if ([Security.Cryptography.CngKey]::Exists($KeyName, $provider, [Security.Cryptography.CngKeyOpenOptions]::MachineKey)) {
-        throw [InvalidOperationException]::new("CNG key '$KeyName' already exists in '$ProviderName'.")
+        $exception = [InvalidOperationException]::new("CNG key '$KeyName' already exists in '$ProviderName'.")
+        $PSCmdlet.WriteError([Management.Automation.ErrorRecord]::new(
+            $exception,
+            'IntunePfxImportKeyAlreadyExists',
+            [Management.Automation.ErrorCategory]::ResourceExists,
+            $KeyName))
+        return
     }
     if ($PSCmdlet.ShouldProcess("$ProviderName\$KeyName", 'Import machine RSA private key')) {
         $parameters = New-Object Security.Cryptography.CngKeyCreationParameters
@@ -678,7 +792,9 @@ function Set-IntuneAuthenticationToken {
     .SYNOPSIS
     Authenticates the current PowerShell session to Microsoft Graph.
     .DESCRIPTION
-    Stores a session-only auth context. Configuration is supplied as command-line parameters, not module manifest PrivateData.
+    Stores a session-only auth context. Prefer command-line parameters or a Setup object.
+    For Version 2 compatibility, omitted values can be read from the module manifest PrivateData block.
+    Manifest-stored client secrets remain supported only for migration and are not recommended.
     .PARAMETER ClientId
     Application (client) ID of the Entra application registration.
     .PARAMETER Setup
@@ -703,12 +819,18 @@ function Set-IntuneAuthenticationToken {
     Set-IntuneAuthenticationToken -ClientId $clientId -TenantId $tenantId -ClientSecret $secret
     .EXAMPLE
     Set-IntuneAuthenticationToken -Setup $setup
+    .EXAMPLE
+    Set-IntuneAuthenticationToken -AdminUserName admin@contoso.com
+    Uses the Version 2 manifest ClientId when present and starts delegated device-code authentication.
+    .EXAMPLE
+    Set-IntuneAuthenticationToken
+    Uses Version 2 manifest ClientId, TenantId, and ClientSecret values when configured.
     #>
     [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium', DefaultParameterSetName = 'DeviceCode')]
     param(
-        [Parameter(Mandatory, ParameterSetName = 'ClientSecret')]
-        [Parameter(Mandatory, ParameterSetName = 'Password')]
-        [Parameter(Mandatory, ParameterSetName = 'DeviceCode')]
+        [Parameter(ParameterSetName = 'ClientSecret')]
+        [Parameter(ParameterSetName = 'Password')]
+        [Parameter(ParameterSetName = 'DeviceCode')]
         [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')][string]$ClientId,
         [Parameter(Mandatory, Position = 0, ParameterSetName = 'Setup')]
         [ValidateNotNull()][psobject]$Setup,
@@ -728,6 +850,7 @@ function Set-IntuneAuthenticationToken {
     )
 
     $authenticationType = $PSCmdlet.ParameterSetName
+    $legacyConfiguration = Get-IntuneLegacyModuleConfiguration
     if ($authenticationType -eq 'Setup') {
         $setupParametersProperty = $Setup.PSObject.Properties['SetIntuneAuthenticationTokenParameters']
         if ($null -eq $setupParametersProperty -or $setupParametersProperty.Value -isnot [Collections.IDictionary]) {
@@ -757,6 +880,49 @@ function Set-IntuneAuthenticationToken {
             throw [ArgumentException]::new('Setup requires a client secret. Run Initialize-IntunePfxImportApplication with -CreateClientSecret, or provide explicit authentication parameters.')
         }
         $authenticationType = if ($null -ne $ClientSecret) { 'ClientSecret' } else { 'DeviceCode' }
+    }
+    else {
+        if ([string]::IsNullOrWhiteSpace($ClientId)) {
+            $ClientId = [string](Get-IntuneLegacyConfigurationValue -Configuration $legacyConfiguration -Name 'ClientId')
+        }
+        if (-not $PSBoundParameters.ContainsKey('TenantId')) {
+            $TenantId = [string](Get-IntuneLegacyConfigurationValue -Configuration $legacyConfiguration -Name 'TenantId')
+        }
+        if (-not $PSBoundParameters.ContainsKey('AuthUri')) {
+            $legacyValue = [string](Get-IntuneLegacyConfigurationValue -Configuration $legacyConfiguration -Name 'AuthURI')
+            if (-not [string]::IsNullOrWhiteSpace($legacyValue)) { $AuthUri = $legacyValue }
+        }
+        if (-not $PSBoundParameters.ContainsKey('GraphUri')) {
+            $legacyValue = [string](Get-IntuneLegacyConfigurationValue -Configuration $legacyConfiguration -Name 'GraphURI')
+            if (-not [string]::IsNullOrWhiteSpace($legacyValue)) { $GraphUri = $legacyValue }
+        }
+        if (-not $PSBoundParameters.ContainsKey('SchemaVersion')) {
+            $legacyValue = [string](Get-IntuneLegacyConfigurationValue -Configuration $legacyConfiguration -Name 'SchemaVersion')
+            if (-not [string]::IsNullOrWhiteSpace($legacyValue)) { $SchemaVersion = $legacyValue }
+        }
+        if (-not $PSBoundParameters.ContainsKey('RedirectUri')) {
+            $legacyValue = [string](Get-IntuneLegacyConfigurationValue -Configuration $legacyConfiguration -Name 'RedirectURI')
+            if (-not [string]::IsNullOrWhiteSpace($legacyValue)) { $RedirectUri = $legacyValue }
+        }
+
+        if ($authenticationType -eq 'DeviceCode' -and [string]::IsNullOrWhiteSpace($AdminUserName)) {
+            $legacySecret = Get-IntuneLegacyConfigurationValue -Configuration $legacyConfiguration -Name 'ClientSecret'
+            if ($legacySecret -is [Security.SecureString]) {
+                $ClientSecret = $legacySecret
+                $authenticationType = 'ClientSecret'
+            }
+            elseif (-not [string]::IsNullOrWhiteSpace([string]$legacySecret)) {
+                $ClientSecret = ConvertTo-SecureString ([string]$legacySecret) -AsPlainText -Force
+                $authenticationType = 'ClientSecret'
+            }
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($ClientId)) {
+        throw [ArgumentException]::new('ClientId is required. Pass -ClientId, use -Setup, or configure ClientId in the Version 2 compatibility PrivateData block.')
+    }
+    if ($authenticationType -eq 'ClientSecret' -and [string]::IsNullOrWhiteSpace($TenantId)) {
+        throw [ArgumentException]::new('TenantId is required for client-secret authentication.')
     }
 
     $authority = Get-IntuneAuthorityUri -AuthUri $AuthUri -TenantId $TenantId
@@ -842,6 +1008,8 @@ function New-IntuneUserPfxCertificate {
     Creates a userPFXCertificate object for Graph import.
     .DESCRIPTION
     Loads the PFX with EphemeralKeySet, detects rsa, ecc, or unknown, and encrypts its password with a CNG key or exported public key.
+    ProviderName and KeyName are remembered for later calls in the same module session, matching Version 2 behavior.
+    KeyAlgorithm is local diagnostic metadata and is not sent to Microsoft Graph.
     .PARAMETER PathToPfxFile
     Path to a PFX file. Use this parameter set or Base64EncodedPfx.
     .PARAMETER Base64EncodedPfx
@@ -849,15 +1017,16 @@ function New-IntuneUserPfxCertificate {
     .PARAMETER PfxPassword
     Secure password that protects the PFX private key.
     .PARAMETER UPN
-    User principal name to associate with the imported certificate. When omitted, the module uses the certificate UPN or email name.
+    Existing Microsoft Entra user principal name in the authenticated tenant that receives the certificate.
+    When omitted, the module uses the certificate UPN or email name.
     .PARAMETER ProviderName
     CNG provider that contains the password-encryption key when KeyFilePath is not used.
     .PARAMETER KeyName
     Name of the CNG password-encryption key when KeyFilePath is not used.
     .PARAMETER IntendedPurpose
-    Intune certificate purpose tag.
+    Intune certificate purpose tag. Version 2 numeric values 0, 1, 2, 4, and 8 remain accepted.
     .PARAMETER PaddingScheme
-    RSA OAEP padding scheme used to encrypt the PFX password.
+    RSA OAEP padding scheme used to encrypt the PFX password. Version 2 value None remains accepted as an alias for OaepSha512.
     .PARAMETER KeyFilePath
     Public key file exported by Export-IntunePublicKey, in CNG blob or PEM format.
     .EXAMPLE
@@ -871,10 +1040,47 @@ function New-IntuneUserPfxCertificate {
         [Parameter(Position = 3)][string]$UPN,
         [Parameter(Position = 4)][string]$ProviderName,
         [Parameter(Position = 5)][string]$KeyName,
-        [Parameter(Position = 6)][ValidateSet('unassigned', 'smimeEncryption', 'smimeSigning', 'vpn', 'wifi')][string]$IntendedPurpose = 'unassigned',
-        [Parameter(Position = 7)][ValidateSet('OaepSha256', 'OaepSha384', 'OaepSha512')][string]$PaddingScheme = 'OaepSha512',
+        [Parameter(Position = 6)][object]$IntendedPurpose = 'unassigned',
+        [Parameter(Position = 7)][object]$PaddingScheme = 'OaepSha512',
         [Parameter(Position = 8)][string]$KeyFilePath
     )
+
+    $purposeMap = @{
+        '0' = 'unassigned'
+        '1' = 'smimeEncryption'
+        '2' = 'smimeSigning'
+        '4' = 'vpn'
+        '8' = 'wifi'
+    }
+    $purposeText = [string]$IntendedPurpose
+    if ($purposeMap.ContainsKey($purposeText)) {
+        $IntendedPurpose = $purposeMap[$purposeText]
+    }
+    elseif ($purposeText -inotin @('unassigned', 'smimeEncryption', 'smimeSigning', 'vpn', 'wifi')) {
+        throw [ArgumentException]::new("IntendedPurpose '$purposeText' is invalid. Use unassigned, smimeEncryption, smimeSigning, vpn, wifi, or the Version 2 numeric values 0, 1, 2, 4, or 8.")
+    }
+    else {
+        $IntendedPurpose = $purposeText
+    }
+
+    $paddingText = [string]$PaddingScheme
+    if ($paddingText -ieq 'None') {
+        $PaddingScheme = 'OaepSha512'
+    }
+    elseif ($paddingText -inotin @('OaepSha256', 'OaepSha384', 'OaepSha512')) {
+        throw [ArgumentException]::new("PaddingScheme '$paddingText' is invalid. Use OaepSha256, OaepSha384, OaepSha512, or the Version 2 compatibility value None.")
+    }
+    else {
+        $PaddingScheme = $paddingText
+    }
+
+    $keyParameters = Resolve-IntuneEncryptionKeyParameters `
+        -ProviderName $ProviderName `
+        -KeyName $KeyName `
+        -ProviderNameWasBound ($PSBoundParameters.ContainsKey('ProviderName')) `
+        -KeyNameWasBound ($PSBoundParameters.ContainsKey('KeyName'))
+    $ProviderName = $keyParameters.ProviderName
+    $KeyName = $keyParameters.KeyName
 
     [byte[]]$pfxData = $null
     if ($PSCmdlet.ParameterSetName -eq 'Path') {
@@ -896,8 +1102,8 @@ function New-IntuneUserPfxCertificate {
 
     $thumbprint = $certificate.Thumbprint.ToLowerInvariant()
     $oid = $certificate.PublicKey.Oid.Value
-    $startDateTime = $certificate.NotBefore.ToUniversalTime()
-    $expirationDateTime = $certificate.NotAfter.ToUniversalTime()
+    $startDateTime = [DateTimeOffset]$certificate.NotBefore.ToUniversalTime()
+    $expirationDateTime = [DateTimeOffset]$certificate.NotAfter.ToUniversalTime()
     if ([string]::IsNullOrWhiteSpace($UPN)) {
         $UPN = $certificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::UpnName, $false)
         if ([string]::IsNullOrWhiteSpace($UPN)) {
@@ -921,21 +1127,25 @@ function New-IntuneUserPfxCertificate {
         $certificate.Dispose()
     }
     $keyAlgorithm = if ($oid -eq '1.2.840.113549.1.1.1') { 'rsa' } elseif ($oid -eq '1.2.840.10045.2.1') { 'ecc' } else { 'unknown' }
-    [pscustomobject]@{
-        thumbprint = $thumbprint
-        keyAlgorithm = $keyAlgorithm
-        intendedPurpose = $IntendedPurpose
-        userPrincipalName = $UPN
-        startDateTime = $startDateTime
-        expirationDateTime = $expirationDateTime
-        providerName = $ProviderName
-        keyName = $KeyName
-        paddingScheme = ($PaddingScheme.Substring(0, 1).ToLowerInvariant() + $PaddingScheme.Substring(1))
-        encryptedPfxPassword = [Convert]::ToBase64String($encryptedPassword)
-        encryptedPfxBlob = $pfxData
-        createdDateTime = [DateTime]::UtcNow
-        lastModifiedDateTime = [DateTime]::UtcNow
+    $result = [pscustomobject][ordered]@{
+        Thumbprint = $thumbprint
+        KeyAlgorithm = $keyAlgorithm
+        IntendedPurpose = $IntendedPurpose
+        UserPrincipalName = $UPN
+        StartDateTime = $startDateTime
+        ExpirationDateTime = $expirationDateTime
+        ProviderName = $ProviderName
+        KeyName = $KeyName
+        PaddingScheme = ($PaddingScheme.Substring(0, 1).ToLowerInvariant() + $PaddingScheme.Substring(1))
+        EncryptedPfxPassword = [Convert]::ToBase64String($encryptedPassword)
+        EncryptedPfxBlob = $pfxData
+        CreatedDateTime = [DateTimeOffset]::UtcNow
+        LastModifiedDateTime = [DateTimeOffset]::UtcNow
     }
+    $result.PSObject.TypeNames.Insert(
+        0,
+        'Microsoft.Management.Services.Api.UserPFXCertificate')
+    return $result
 }
 
 function Get-IntuneUserId {
@@ -949,7 +1159,7 @@ function Get-IntuneUserId {
     .EXAMPLE
     Get-IntuneUserId -UPN user@contoso.com
     #>
-    [CmdletBinding()]
+    [CmdletBinding(PositionalBinding = $false)]
     param([Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$UPN)
     $filter = Escape-IntuneODataLiteral -Value $UPN
     $path = New-IntuneODataFilterPath -Path 'users' -Filter "userPrincipalName eq '$filter'"
@@ -973,10 +1183,10 @@ function Get-IntuneUserPfxCertificate {
     .EXAMPLE
     Get-IntuneUserPfxCertificate -UserList user@contoso.com
     #>
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess, PositionalBinding = $false, DefaultParameterSetName = 'FromUsers')]
     param(
-        [Parameter(ValueFromPipeline)][object[]]$UserThumbprintList,
-        [Parameter(ValueFromPipeline)][string[]]$UserList
+        [Parameter(ValueFromPipeline, ParameterSetName = 'FromThumbprints')][object[]]$UserThumbprintList,
+        [Parameter(ValueFromPipeline, ParameterSetName = 'FromUsers')][string[]]$UserList
     )
     process {
         $queries = @()
@@ -998,7 +1208,9 @@ function Get-IntuneUserPfxCertificate {
         foreach ($query in $queries) {
             do {
                 $response = Invoke-IntuneGraphRequest -Method Get -Path $query
-                foreach ($certificate in @($response.value)) { Write-Output $certificate }
+                foreach ($certificate in @($response.value)) {
+                    Write-Output (ConvertFrom-IntuneUserPfxResponse -Certificate $certificate)
+                }
                 $nextLink = $response.PSObject.Properties['@odata.nextLink']
                 $query = if ($null -ne $nextLink) { $nextLink.Value } else { $null }
             } while (-not [string]::IsNullOrWhiteSpace($query))
@@ -1019,24 +1231,29 @@ function Import-IntuneUserPfxCertificate {
     .EXAMPLE
     $certificate | Import-IntuneUserPfxCertificate
     #>
-    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium', PositionalBinding = $false)]
     param(
         [Parameter(Mandatory, ValueFromPipeline)][ValidateNotNullOrEmpty()][object[]]$CertificateList,
         [switch]$IsUpdate
     )
     process {
         foreach ($certificate in $CertificateList) {
-            $body = ConvertTo-IntuneUserPfxBody -Certificate $certificate
-            if ([string]::IsNullOrWhiteSpace($body.thumbprint) -or [string]::IsNullOrWhiteSpace($body.userPrincipalName)) { throw [ArgumentException]::new('Certificate needs thumbprint and userPrincipalName.') }
-            $path = 'deviceManagement/userPfxCertificates'
-            $method = 'Post'
-            if ($IsUpdate) {
-                $userId = Get-IntuneUserId -UPN $body.userPrincipalName
-                $path = "deviceManagement/userPfxCertificates($userId-$($body.thumbprint))"
-                $method = 'Patch'
+            try {
+                $body = ConvertTo-IntuneUserPfxBody -Certificate $certificate
+                if ([string]::IsNullOrWhiteSpace($body.thumbprint) -or [string]::IsNullOrWhiteSpace($body.userPrincipalName)) { throw [ArgumentException]::new('Certificate needs thumbprint and userPrincipalName.') }
+                $path = 'deviceManagement/userPfxCertificates'
+                $method = 'Post'
+                if ($IsUpdate) {
+                    $userId = Get-IntuneUserId -UPN $body.userPrincipalName
+                    $path = "deviceManagement/userPfxCertificates($userId-$($body.thumbprint))"
+                    $method = 'Patch'
+                }
+                if ($PSCmdlet.ShouldProcess("$($body.userPrincipalName)/$($body.thumbprint)", "$method Intune PFX certificate")) {
+                    Invoke-IntuneGraphRequest -Method $method -Path $path -Body $body | Out-Null
+                }
             }
-            if ($PSCmdlet.ShouldProcess("$($body.userPrincipalName)/$($body.thumbprint)", "$method Intune PFX certificate")) {
-                Invoke-IntuneGraphRequest -Method $method -Path $path -Body $body | Out-Null
+            catch {
+                $PSCmdlet.WriteError($_)
             }
         }
     }
@@ -1057,30 +1274,43 @@ function Remove-IntuneUserPfxCertificate {
     .EXAMPLE
     Remove-IntuneUserPfxCertificate -UserList user@contoso.com
     #>
-    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High', DefaultParameterSetName = 'Certificate')]
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium', DefaultParameterSetName = 'FromUserPFXCertificates', PositionalBinding = $false)]
     param(
-        [Parameter(Mandatory, ValueFromPipeline, ParameterSetName = 'Certificate')][object[]]$CertificateList,
-        [Parameter(Mandatory, ValueFromPipeline, ParameterSetName = 'Thumbprint')][object[]]$UserThumbprintList,
-        [Parameter(Mandatory, ValueFromPipeline, ParameterSetName = 'User')][string[]]$UserList
+        [Parameter(Mandatory, ValueFromPipeline, ParameterSetName = 'FromUserPFXCertificates')][object[]]$CertificateList,
+        [Parameter(Mandatory, ValueFromPipeline, ParameterSetName = 'FromThumbprints')][object[]]$UserThumbprintList,
+        [Parameter(Mandatory, ValueFromPipeline, ParameterSetName = 'FromUsers')][string[]]$UserList
     )
     process {
         $targets = @()
-        if ($PSCmdlet.ParameterSetName -eq 'User') {
+        if ($PSCmdlet.ParameterSetName -eq 'FromUsers') {
             foreach ($user in $UserList) {
                 $targets += Get-IntuneUserPfxCertificate -UserList $user | ForEach-Object { [pscustomobject]@{ User = $_.userPrincipalName; Thumbprint = $_.thumbprint } }
             }
         }
-        elseif ($PSCmdlet.ParameterSetName -eq 'Certificate') {
+        elseif ($PSCmdlet.ParameterSetName -eq 'FromUserPFXCertificates') {
             $targets = $CertificateList | ForEach-Object { [pscustomobject]@{ User = $_.userPrincipalName; Thumbprint = $_.thumbprint } }
         }
         else { $targets = $UserThumbprintList }
 
         foreach ($target in $targets) {
-            if ([string]::IsNullOrWhiteSpace($target.User) -or [string]::IsNullOrWhiteSpace($target.Thumbprint)) { throw [ArgumentException]::new('Each removal target needs User and Thumbprint properties.') }
-            $userId = Get-IntuneUserId -UPN $target.User
-            $name = "$userId-$($target.Thumbprint)"
-            if ($PSCmdlet.ShouldProcess($name, 'Remove Intune PFX certificate')) {
-                Invoke-IntuneGraphRequest -Method Delete -Path "deviceManagement/userPfxCertificates/$name" | Out-Null
+            try {
+                if ([string]::IsNullOrWhiteSpace($target.User) -or [string]::IsNullOrWhiteSpace($target.Thumbprint)) { throw [ArgumentException]::new('Each removal target needs User and Thumbprint properties.') }
+                $userId = if ($target.User -match '^[0-9a-fA-F]{32}$') {
+                    $target.User.ToLowerInvariant()
+                }
+                elseif ($target.User -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
+                    $target.User.Replace('-', '').ToLowerInvariant()
+                }
+                else {
+                    Get-IntuneUserId -UPN $target.User
+                }
+                $name = "$userId-$($target.Thumbprint)"
+                if ($PSCmdlet.ShouldProcess($name, 'Remove Intune PFX certificate')) {
+                    Invoke-IntuneGraphRequest -Method Delete -Path "deviceManagement/userPfxCertificates/$name" | Out-Null
+                }
+            }
+            catch {
+                $PSCmdlet.WriteError($_)
             }
         }
     }

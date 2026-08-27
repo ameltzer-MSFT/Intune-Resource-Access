@@ -1,6 +1,6 @@
 @{
     RootModule = 'IntunePfxImport.psm1'
-    ModuleVersion = '4.0.1'
+    ModuleVersion = '3.0.0'
     GUID = '40fbdf09-4bde-43a1-9a37-151640986ccc'
     Author = 'Microsoft'
     CompanyName = 'Microsoft'
@@ -27,4 +27,14 @@
     CmdletsToExport = @()
     VariablesToExport = @()
     AliasesToExport = @()
+    PrivateData = @{
+        # Version 2 compatibility only. Prefer command-line parameters or -Setup.
+        ClientId = ''
+        ClientSecret = ''
+        TenantId = ''
+        AuthURI = 'login.microsoftonline.com'
+        GraphURI = 'https://graph.microsoft.com'
+        SchemaVersion = 'beta'
+        RedirectURI = 'https://login.microsoftonline.com/common/oauth2/nativeclient'
+    }
 }
