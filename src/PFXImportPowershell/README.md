@@ -20,9 +20,33 @@ dependency.
 CNG key operations are Windows-only. Run key creation and import from an
 elevated PowerShell session.
 
-## Quick start
+## Install
+
+The PowerShell module does not need to be built. Download or clone the
+repository, then import the module manifest directly:
 
 ```powershell
+Import-Module .\PFXImportPS\IntunePfxImport.psd1
+```
+
+The retained compiled projects are only used to test an on-premises connector's
+ability to access the encryption key. Most administrators do not need them. See
+[On-premises validation](OnPremValidation/README.md) if you need to build and
+run those optional tools.
+
+## Quick start
+
+Choose either automated or manual Entra application configuration. Both paths
+use the same Version 3 cmdlets for authentication and PFX import.
+
+### Option 1: Configure the Entra application with the cmdlet
+
+This is the quickest path for a new tenant-specific application:
+
+```powershell
+Install-Module Microsoft.Graph.Authentication, Microsoft.Graph.Applications `
+    -Scope CurrentUser
+
 Import-Module .\PFXImportPS\IntunePfxImport.psd1
 
 $setup = Initialize-IntunePfxImportApplication `
@@ -30,8 +54,81 @@ $setup = Initialize-IntunePfxImportApplication `
     -AuthenticationMode PublicClient `
     -ConnectGraph
 
-Set-IntuneAuthenticationToken -Setup $setup
+Start-Process $setup.AdminConsentUri
+# An authorized tenant administrator must review and grant admin consent.
 
+Set-IntuneAuthenticationToken -Setup $setup
+```
+
+`Initialize-IntunePfxImportApplication`:
+
+- Connects to Microsoft Graph with `Application.ReadWrite.All` and
+  `Application.Read.All` when `-ConnectGraph` is specified and no Graph SDK
+  connection exists.
+- Reuses one exact display-name match or creates a single-tenant application.
+- Configures the required delegated Microsoft Graph permissions, public-client
+  flow, and native-client redirect URI.
+- Creates the application's service principal when it does not exist.
+- Returns a setup object containing the client ID, tenant ID, cloud endpoints,
+  authentication settings, and admin-consent URL.
+
+The cmdlet does not grant admin consent. An authorized administrator must open
+`$setup.AdminConsentUri` and approve the requested permissions. `$setup` can
+then be passed directly to `Set-IntuneAuthenticationToken`; do not unpack it
+into separate arguments.
+
+Use `-ExistingApplicationId` to update a specific registration,
+`-ValidateOnly` to report required changes without modifying the tenant, or
+`-AuthenticationMode ClientSecret -CreateClientSecret` for unattended
+authentication. A newly created secret is returned once in
+`$setup.ClientSecret`.
+
+### Option 2: Configure the Entra application manually
+
+Admins who prefer portal configuration can keep the Version 2 setup workflow:
+
+1. Follow [Quickstart: Register an application with the Microsoft identity
+   platform](https://learn.microsoft.com/entra/identity-platform/quickstart-register-app)
+   and create a single-tenant application.
+2. For interactive device-code authentication, add the **Mobile and desktop
+   applications** platform, use
+   `https://login.microsoftonline.com/common/oauth2/nativeclient` as the
+   redirect URI, and enable public-client flows.
+3. Add delegated Microsoft Graph permissions
+   `DeviceManagementConfiguration.ReadWrite.All`, `User.Read.All`, and
+   `User.Read`.
+4. Grant tenant-wide admin consent.
+5. Record the application (client) ID and directory (tenant) ID, then
+   authenticate:
+
+```powershell
+Import-Module .\PFXImportPS\IntunePfxImport.psd1
+
+Set-IntuneAuthenticationToken `
+    -ClientId '<application-client-id>' `
+    -TenantId '<tenant-id>' `
+    -AdminUserName 'admin@contoso.com'
+```
+
+For unattended authentication, configure
+`DeviceManagementConfiguration.ReadWrite.All` and `User.Read.All` as
+**application** permissions, grant admin consent, and create a client secret.
+Pass the secret at runtime instead of storing it in the module manifest:
+
+```powershell
+$clientSecret = Read-Host 'Application client secret' -AsSecureString
+Set-IntuneAuthenticationToken `
+    -ClientId '<application-client-id>' `
+    -TenantId '<tenant-id>' `
+    -ClientSecret $clientSecret
+```
+
+### Create and import the PFX record
+
+After authenticating with either option, create the connector encryption key,
+prepare the Graph record, import it, and verify it:
+
+```powershell
 Add-IntuneKspKey `
     -ProviderName 'Microsoft Software Key Storage Provider' `
     -KeyName 'PfxImportKey'
@@ -49,9 +146,13 @@ Import-IntuneUserPfxCertificate -CertificateList $record
 Get-IntuneUserPfxCertificate -UserList user@contoso.com
 ```
 
-`$setup` contains the application, tenant, cloud, schema, redirect, and
-authentication-mode settings needed by `Set-IntuneAuthenticationToken`. Pass it
-directly--do not unpack it into separate arguments.
+`Add-IntuneKspKey` creates the machine CNG key used by the Intune Certificate
+Connector to decrypt the PFX password. `New-IntuneUserPfxCertificate` reads the
+PFX without installing it, encrypts its password with that CNG key, and creates
+the local Graph record. `Import-IntuneUserPfxCertificate` sends the record to
+Intune. `Get-IntuneUserPfxCertificate` reads the persisted record back.
+
+Run `Remove-IntuneAuthenticationToken` when finished.
 
 ## Operator identity and target UPN
 
