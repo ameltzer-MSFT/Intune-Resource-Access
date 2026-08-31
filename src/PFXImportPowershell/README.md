@@ -8,6 +8,43 @@ configuration, and Entra application onboarding.
 `EncryptionUtilities` remains only for `OnPremValidation`; it is not a module
 dependency.
 
+## What's new in Version 3.0
+
+Version 3.0 replaces the shipped Version 2 compiled module with a pure
+PowerShell script module.
+
+- **No module build required** -- import `IntunePfxImport.psd1` directly from
+  `PFXImportPS`.
+- **PowerShell 7 support** -- the module continues to support Windows
+  PowerShell 5.1 and now also runs in PowerShell 7 on Windows.
+- **Automated Entra application onboarding** --
+  `Initialize-IntunePfxImportApplication` creates, validates, or updates the
+  tenant-specific application registration and returns settings that can be
+  passed directly to `Set-IntuneAuthenticationToken`.
+- **Command-line authentication configuration** -- client IDs, tenant IDs,
+  client secrets, cloud endpoints, and setup objects can be supplied at
+  runtime. Editing `IntunePfxImport.psd1` is no longer required.
+- **ECC PFX support** -- `New-IntuneUserPfxCertificate` accepts RSA and ECC PFX
+  certificates while continuing to use the connector's RSA CNG key to encrypt
+  the PFX password.
+- **Safer certificate handling** -- PFX files are loaded with
+  `EphemeralKeySet` and are not installed into a certificate store.
+- **Sovereign cloud configuration** -- authentication and Graph endpoints can
+  be selected at runtime, including GCC High.
+- **Operational reliability** -- Graph paging, bounded retry behavior,
+  per-record batch continuation, path handling, diagnostics, and
+  `-WhatIf`/`-Confirm` support are improved.
+- **Non-production E2E example** --
+  `Examples\Test-IntunePfxImportE2E.ps1` demonstrates app setup, authentication,
+  key creation, PFX generation, import verification, and cleanup.
+
+All 12 shipped Version 2 command names remain available. Common positional
+arguments, pipeline input, parameter-set names, intended-purpose numbers, CNG
+key formats, manifest authentication fallback, and output property names are
+preserved. The old compiled CLR classes and enums are not loaded; scripts
+should use the returned PowerShell object's properties instead of static CLR
+casts. See [Version 2 compatibility](#version-2-compatibility) for details.
+
 ## Requirements
 
 - Windows PowerShell 5.1 with .NET Framework 4.7.2, or PowerShell 7 on Windows.
